@@ -12,12 +12,12 @@ describe("Migration files", () => {
     .filter((f) => f.endsWith(".sql"))
     .sort();
 
-  it("should have exactly 30 migration files", () => {
-    expect(files.length).toBe(30);
+  it("should have exactly 36 migration files", () => {
+    expect(files.length).toBe(36);
   });
 
-  it("should have filenames in correct order (001-030)", () => {
-    for (let i = 0; i < 30; i++) {
+  it("should have filenames in correct order (001-036)", () => {
+    for (let i = 0; i < 36; i++) {
       const expected = String(i + 1).padStart(3, "0");
       expect(files[i]).toMatch(new RegExp(`^${expected}_`));
     }
@@ -69,6 +69,10 @@ describe("Migration files", () => {
       "027_rental_settlements.sql": "rental_settlements",
       "028_telegram_users.sql": "telegram_users",
       "029_point_deductions.sql": "point_deductions",
+      "031_protocol_auth_sessions.sql": "protocol_auth_sessions",
+      "032_protocol_idls.sql": "protocol_idls",
+      "033_program_profiles.sql": "program_profiles",
+      "034_protocol_blinks.sql": "protocol_blinks",
     };
 
     // Migrations that do NOT create a table — each must define a regex the
@@ -76,6 +80,10 @@ describe("Migration files", () => {
     const expectedAlters: Record<string, RegExp> = {
       "030_merkle_proofs_unique_epoch_authority.sql":
         /ALTER TABLE\s+merkle_proofs/i,
+      "035_campaigns_extensions.sql":
+        /ALTER TABLE\s+campaigns[\s\S]*ADD COLUMN\s+verification_config/i,
+      "036_point_events_channel.sql":
+        /ALTER TABLE\s+point_events[\s\S]*ADD COLUMN\s+channel/i,
     };
 
     for (const file of files) {
