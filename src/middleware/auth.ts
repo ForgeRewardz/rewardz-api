@@ -267,3 +267,66 @@ export async function requireInternalKey(
 
   request.isInternalService = true;
 }
+
+/* -------------------------------------------------------------------------- */
+/*  5. Admin wallet gate — ADMIN_WALLETS allowlist (Klaus R15)                */
+/* -------------------------------------------------------------------------- */
+
+/**
+ * Gate an endpoint to admin wallets only. Must be chained after
+ * `requireBearerAuth` — expects `request.walletAddress` to be
+ * populated. Returns 403 if the authenticated wallet is not in the
+ * ADMIN_WALLETS env allowlist. Klaus R15.
+ */
+export async function requireAdminAuth(
+  request: FastifyRequest,
+  reply: FastifyReply,
+): Promise<void> {
+  const wallet = request.walletAddress;
+  if (!wallet) {
+    reply.status(401).send({ error: "authentication required" });
+    return;
+  }
+  if (!config.ADMIN_WALLETS.includes(wallet)) {
+    reply.status(403).send({ error: "admin access required" });
+    return;
+  }
+}
+
+/* -------------------------------------------------------------------------- */
+/*  6. Protocol-owner gate — /v1/protocols/:id/*                              */
+/* -------------------------------------------------------------------------- */
+
+/**
+ * Gate an endpoint scoped to `/v1/protocols/:id/*` to the protocol's
+ * registered admin wallet. Must be chained after `requireBearerAuth`.
+ *
+ * Looks up the protocol by id and asserts that
+ * `protocols.admin_wallet` matches the authenticated wallet.
+ * Returns 404 if the protocol doesn't exist, 403 otherwise.
+ */
+export async function requireProtocolOwner(
+  request: FastifyRequest<{ Params: { id: string } }>,
+  reply: FastifyReply,
+): Promise<void> {
+  const wallet = request.walletAddress;
+  if (!wallet) {
+    reply.status(401).send({ error: "authentication required" });
+    return;
+  }
+
+  const protocolId = request.params.id;
+  const result = await query<{ admin_wallet: string }>(
+    `SELECT admin_wallet FROM protocols WHERE id = $1 LIMIT 1`,
+    [protocolId],
+  );
+
+  if (result.rowCount === 0) {
+    reply.status(404).send({ error: "protocol not found" });
+    return;
+  }
+  if (result.rows[0].admin_wallet !== wallet) {
+    reply.status(403).send({ error: "protocol access denied" });
+    return;
+  }
+}

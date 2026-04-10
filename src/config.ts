@@ -14,6 +14,17 @@ const envSchema = z.object({
   JWT_SECRET: z.string().min(1, "JWT_SECRET is required"),
   INTERNAL_API_KEY: z.string().min(1, "INTERNAL_API_KEY is required"),
   ALLOWED_ORIGINS: z.string().optional(), // Comma-separated allowed CORS origins
+  // Comma-separated base58 pubkeys allowed to hit admin-only endpoints.
+  // Empty / unset env ⇒ empty array ⇒ all admin calls are rejected.
+  ADMIN_WALLETS: z
+    .string()
+    .default("")
+    .transform((s) =>
+      s
+        .split(",")
+        .map((w) => w.trim())
+        .filter((w) => w.length > 0),
+    ),
 });
 
 const parsed = envSchema.safeParse(process.env);
