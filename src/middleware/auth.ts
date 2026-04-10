@@ -1,4 +1,4 @@
-import crypto from "node:crypto";
+import crypto, { randomUUID } from "node:crypto";
 import type { FastifyRequest, FastifyReply } from "fastify";
 import { PublicKey } from "@solana/web3.js";
 import jwt from "jsonwebtoken";
@@ -127,10 +127,73 @@ export async function requireWalletAuth(
 /*  3. Bearer token auth – JWT                                                */
 /* -------------------------------------------------------------------------- */
 
-interface JwtPayload {
+/**
+ * Canonical protocol session JWT claims. `signProtocolSessionJWT` stamps
+ * all of these; `requireBearerAuth` verifies `aud`, `iss`, and the
+ * `jti` revocation flag on every request.
+ */
+export interface ProtocolSessionClaims {
   wallet_address: string;
-  iat?: number;
-  exp?: number;
+  jti: string;
+  aud: "rewardz-api";
+  iss: "rewardz-console";
+  iat: number;
+  exp: number;
+}
+
+export interface SignProtocolSessionJWTArgs {
+  wallet: string;
+  /** Optional pre-generated jti — callers usually pass
+   *  `protocol_auth_sessions.id` so logout can revoke by that row. */
+  jti?: string;
+}
+
+export interface SignedProtocolSessionJWT {
+  token: string;
+  jti: string;
+  expiresAt: Date;
+}
+
+/**
+ * Sign a short-lived (15 min) protocol session JWT. The returned token
+ * includes a `jti` for server-side revocation via protocol_auth_sessions
+ * and the fixed `aud`/`iss` claims `requireBearerAuth` asserts.
+ */
+export function signProtocolSessionJWT(
+  args: SignProtocolSessionJWTArgs,
+): SignedProtocolSessionJWT {
+  const jti = args.jti ?? randomUUID();
+  const expiresIn = 15 * 60; // 15 minutes
+  const token = jwt.sign({ wallet_address: args.wallet }, config.JWT_SECRET, {
+    expiresIn,
+    jwtid: jti,
+    audience: "rewardz-api",
+    issuer: "rewardz-console",
+  });
+  const expiresAt = new Date(Date.now() + expiresIn * 1000);
+  return { token, jti, expiresAt };
+}
+
+/**
+ * Generate a URL-safe, unguessable nonce for `/v1/auth/challenge`.
+ * 32 bytes of CSPRNG entropy rendered as base64url — ~256 bits, more
+ * than enough to resist any practical guessing attack.
+ */
+export function generateNonce(): string {
+  return crypto.randomBytes(32).toString("base64url");
+}
+
+/**
+ * Lazy-injected JWT revocation check. Default is a noop so this module
+ * stays importable without a pg pool (e.g. in unit tests). The
+ * auth-sessions service wires the real implementation at startup via
+ * `setJtiRevocationCheck`. Tests may override with a fake.
+ */
+type JtiRevocationCheck = (jti: string) => Promise<boolean>;
+let isJtiRevokedImpl: JtiRevocationCheck = async () => false;
+
+export function setJtiRevocationCheck(fn: JtiRevocationCheck): void {
+  isJtiRevokedImpl = fn;
 }
 
 export async function requireBearerAuth(
@@ -146,18 +209,35 @@ export async function requireBearerAuth(
 
   const token = authHeader.slice(7);
 
+  let payload: ProtocolSessionClaims;
   try {
-    const payload = jwt.verify(token, config.JWT_SECRET) as JwtPayload;
-
-    if (!payload.wallet_address) {
-      unauthorized(reply, "Token missing wallet_address claim");
-      return;
-    }
-
-    request.walletAddress = payload.wallet_address;
+    payload = jwt.verify(token, config.JWT_SECRET, {
+      audience: "rewardz-api",
+      issuer: "rewardz-console",
+    }) as ProtocolSessionClaims;
   } catch {
     unauthorized(reply, "Invalid or expired bearer token");
+    return;
   }
+
+  if (!payload.wallet_address) {
+    unauthorized(reply, "Token missing wallet_address claim");
+    return;
+  }
+  if (!payload.jti) {
+    unauthorized(reply, "Token missing jti claim");
+    return;
+  }
+
+  // Revocation check – logout / admin revocation flips revoked_at so
+  // any subsequent request on that jti is rejected.
+  const revoked = await isJtiRevokedImpl(payload.jti);
+  if (revoked) {
+    unauthorized(reply, "Token has been revoked");
+    return;
+  }
+
+  request.walletAddress = payload.wallet_address;
 }
 
 /* -------------------------------------------------------------------------- */
