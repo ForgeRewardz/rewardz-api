@@ -5,9 +5,9 @@
  *
  * Usage:
  *
- *     import { createTestApp, authHeader } from "./helpers/test-app.js";
+ *     import { createTestApp, authHeader, type TestApp } from "./helpers/test-app.js";
  *
- *     let app: Awaited<ReturnType<typeof createTestApp>>;
+ *     let app: TestApp;
  *
  *     beforeAll(async () => {
  *       app = await createTestApp();
@@ -27,16 +27,17 @@
  *     });
  *
  * The auth header helpers mint short-lived JWTs using the same
- * `JWT_SECRET` the API reads at startup. Callers that need an admin
- * wallet should use `adminAuthHeader` — the list of admin wallets will
- * be wired up by Session 2 via `ADMIN_WALLETS`. Until then the helper
- * mints the same shape of token as `authHeader`; tests that rely on
- * admin-vs-user distinction will need to wait for the middleware work.
+ * `JWT_SECRET`, `JWT_AUDIENCE`, and `JWT_ISSUER` the API verifies with,
+ * so tokens they produce pass `requireBearerAuth` without fuss. For
+ * `requireAdminAuth`-protected routes, use `adminAuthHeader` and make
+ * sure the wallet is in `ADMIN_WALLETS` before the test runs.
  */
 
+import { randomUUID } from "node:crypto";
 import jwt from "jsonwebtoken";
 import { buildApp } from "../../src/server.js";
 import { config } from "../../src/config.js";
+import { JWT_AUDIENCE, JWT_ISSUER } from "../../src/middleware/auth.js";
 
 export type TestApp = ReturnType<typeof buildApp>;
 
@@ -64,13 +65,13 @@ interface JwtClaims {
 }
 
 interface MintOptions {
-  /** Seconds until expiry. Default 900 (15 min). */
+  /** Seconds until expiry. Default 900 (15 min), matching signProtocolSessionJWT. */
   expiresInSeconds?: number;
-  /** Override JWT id (jti). Default: crypto.randomUUID(). */
+  /** Override JWT id (jti). Default: randomUUID(). */
   jti?: string;
-  /** Audience claim. Default matches Session 2 plan value. */
+  /** Audience claim. Defaults to the shared JWT_AUDIENCE const. */
   audience?: string;
-  /** Issuer claim. Default matches Session 2 plan value. */
+  /** Issuer claim. Defaults to the shared JWT_ISSUER const. */
   issuer?: string;
 }
 
@@ -80,9 +81,9 @@ function mintJwt(walletAddress: string, options: MintOptions = {}): string {
   };
   return jwt.sign(payload, config.JWT_SECRET, {
     expiresIn: options.expiresInSeconds ?? 900,
-    jwtid: options.jti ?? crypto.randomUUID(),
-    audience: options.audience ?? "rewardz-api",
-    issuer: options.issuer ?? "rewardz-console",
+    jwtid: options.jti ?? randomUUID(),
+    audience: options.audience ?? JWT_AUDIENCE,
+    issuer: options.issuer ?? JWT_ISSUER,
   });
 }
 
@@ -102,12 +103,17 @@ export function authHeader(
 
 /**
  * Build a `{ Authorization: "Bearer <jwt>" }` header for an admin
- * wallet. Currently identical in shape to `authHeader` — the
- * admin-vs-user gating will be enforced in Session 2 once
- * `requireAdminAuth` and the `ADMIN_WALLETS` config land. The separate
- * function exists so tests can declare intent up-front and will
- * automatically pick up the stricter behaviour when the middleware
- * ships.
+ * wallet. Mints the same JWT shape as `authHeader` — the admin gate
+ * lives in `requireAdminAuth`, which checks membership in the
+ * `ADMIN_WALLETS` env allowlist at request time.
+ *
+ * **Test-environment contract:** the caller must ensure the wallet it
+ * passes is present in `ADMIN_WALLETS` before the test runs, otherwise
+ * `requireAdminAuth` will (correctly) return 403. The simplest pattern
+ * is to `process.env.ADMIN_WALLETS = wallet` inside a `beforeEach` and
+ * restore it in `afterEach` — but note that `config.ts` reads the env
+ * at import time, so tests that depend on ADMIN_WALLETS should either
+ * set the env before importing the app or reload config per test.
  */
 export function adminAuthHeader(
   walletAddress: string,

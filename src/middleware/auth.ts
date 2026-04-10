@@ -128,6 +128,19 @@ export async function requireWalletAuth(
 /* -------------------------------------------------------------------------- */
 
 /**
+ * Fixed JWT audience claim. Stamped by `signProtocolSessionJWT` and
+ * asserted by `requireBearerAuth`. Exported so test helpers (and any
+ * future console cookie signer) can mint tokens without hardcoding the
+ * string — drift between issuer and verifier is a silent 401 otherwise.
+ */
+export const JWT_AUDIENCE = "rewardz-api" as const;
+
+/**
+ * Fixed JWT issuer claim. See `JWT_AUDIENCE` for the rationale.
+ */
+export const JWT_ISSUER = "rewardz-console" as const;
+
+/**
  * Canonical protocol session JWT claims. `signProtocolSessionJWT` stamps
  * all of these; `requireBearerAuth` verifies `aud`, `iss`, and the
  * `jti` revocation flag on every request.
@@ -135,8 +148,8 @@ export async function requireWalletAuth(
 export interface ProtocolSessionClaims {
   wallet_address: string;
   jti: string;
-  aud: "rewardz-api";
-  iss: "rewardz-console";
+  aud: typeof JWT_AUDIENCE;
+  iss: typeof JWT_ISSUER;
   iat: number;
   exp: number;
 }
@@ -167,8 +180,8 @@ export function signProtocolSessionJWT(
   const token = jwt.sign({ wallet_address: args.wallet }, config.JWT_SECRET, {
     expiresIn,
     jwtid: jti,
-    audience: "rewardz-api",
-    issuer: "rewardz-console",
+    audience: JWT_AUDIENCE,
+    issuer: JWT_ISSUER,
   });
   const expiresAt = new Date(Date.now() + expiresIn * 1000);
   return { token, jti, expiresAt };
