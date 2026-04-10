@@ -12,27 +12,33 @@ describe("Migration files", () => {
     .filter((f) => f.endsWith(".sql"))
     .sort();
 
-  it("should have exactly 28 migration files", () => {
-    expect(files.length).toBe(28);
+  it("should have exactly 30 migration files", () => {
+    expect(files.length).toBe(30);
   });
 
-  it("should have filenames in correct order (001-028)", () => {
-    for (let i = 0; i < 28; i++) {
+  it("should have filenames in correct order (001-030)", () => {
+    for (let i = 0; i < 30; i++) {
       const expected = String(i + 1).padStart(3, "0");
       expect(files[i]).toMatch(new RegExp(`^${expected}_`));
     }
   });
 
-  it("should have each file starting with CREATE", () => {
+  it("should have each file starting with CREATE or ALTER", () => {
     for (const file of files) {
-      const content = fs
-        .readFileSync(path.join(MIGRATIONS_DIR, file), "utf-8")
+      const content = fs.readFileSync(path.join(MIGRATIONS_DIR, file), "utf-8");
+      // Strip leading SQL comments and blank lines, then ensure the first
+      // statement is either CREATE or ALTER (some migrations only alter).
+      const stripped = content
+        .split("\n")
+        .filter((line) => !/^\s*--/.test(line))
+        .join("\n")
         .trim();
-      expect(content).toMatch(/^CREATE\s/i);
+      expect(stripped).toMatch(/^(CREATE|ALTER)\s/i);
     }
   });
 
   it("should have valid SQL in each migration file", () => {
+    // Migrations that create a table keyed by file → expected table name.
     const expectedTables: Record<string, string> = {
       "001_users.sql": "users",
       "002_merkle_proofs.sql": "merkle_proofs",
@@ -62,15 +68,30 @@ describe("Migration files", () => {
       "026_leaderboard_snapshots.sql": "leaderboard_snapshots",
       "027_rental_settlements.sql": "rental_settlements",
       "028_telegram_users.sql": "telegram_users",
+      "029_point_deductions.sql": "point_deductions",
+    };
+
+    // Migrations that do NOT create a table — each must define a regex the
+    // file body is expected to match.
+    const expectedAlters: Record<string, RegExp> = {
+      "030_merkle_proofs_unique_epoch_authority.sql":
+        /ALTER TABLE\s+merkle_proofs/i,
     };
 
     for (const file of files) {
       const content = fs
         .readFileSync(path.join(MIGRATIONS_DIR, file), "utf-8")
         .trim();
-      const expectedTable = expectedTables[file];
-      expect(expectedTable).toBeDefined();
-      expect(content).toContain(`CREATE TABLE ${expectedTable}`);
+      if (file in expectedTables) {
+        const expectedTable = expectedTables[file];
+        expect(content).toContain(`CREATE TABLE ${expectedTable}`);
+      } else if (file in expectedAlters) {
+        expect(content).toMatch(expectedAlters[file]);
+      } else {
+        throw new Error(
+          `Migration ${file} is not declared in expectedTables or expectedAlters`,
+        );
+      }
     }
   });
 });
