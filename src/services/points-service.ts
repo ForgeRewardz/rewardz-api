@@ -345,10 +345,31 @@ export async function batchAward(
     }
 
     await client.query("COMMIT");
-  } catch (err) {
+  } catch (_err) {
     await client.query("ROLLBACK");
 
-    // If we haven't recorded the failure yet (unexpected error), mark remaining
+    // Rollback semantics: the tx rolled back, so every "success" or
+    // "duplicate" row previously pushed to `results` never actually landed
+    // in the database. We must re-mark them as failed and zero out the
+    // success/duplicate counters so the returned BatchResult reflects the
+    // fact that nothing was committed.
+    succeeded = 0;
+    duplicates = 0;
+    failed = 0;
+    for (let i = 0; i < results.length; i++) {
+      const prev = results[i];
+      if (prev.success) {
+        results[i] = {
+          wallet: prev.wallet,
+          success: false,
+          error: "Batch rolled back due to earlier failure",
+        };
+      }
+      failed++;
+    }
+
+    // If we haven't recorded every item yet (the throw happened before the
+    // failing item was pushed), pad the remainder as failed.
     if (results.length < awards.length) {
       for (let i = results.length; i < awards.length; i++) {
         failed++;
