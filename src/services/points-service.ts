@@ -1,9 +1,35 @@
 import { query, pool } from "../db/client.js";
 import type { UserBalance, PointEvent } from "../types/index.js";
+import {
+  getActiveSeason,
+  upsertProtocolScore,
+  upsertUserSeasonScore,
+} from "./leaderboard-service.js";
+import type { Channel } from "./leaderboard-service.js";
 
 /* -------------------------------------------------------------------------- */
 /*  Types                                                                     */
 /* -------------------------------------------------------------------------- */
+
+/**
+ * Re-export the canonical `Channel` type from leaderboard-service so
+ * call-sites can import it alongside `awardPoints` / `batchAward` without
+ * reaching into a sibling service.
+ *
+ * Channel is the ingestion surface that produced a point award. It is
+ * distinct from `source.type` (which governs idempotency column routing —
+ * signature vs reference). `channel` governs which `protocol_scores.*_points`
+ * column the season-score hook bumps.
+ *
+ * Reserved values:
+ *   - 'api'        — console / protocol API key awards
+ *   - 'webhook'    — external webhook deliveries (e.g. Zealy)
+ *   - 'blink'      — blink-completion flow (routes/completions.ts)
+ *   - 'completion' — quest completions (routes/quests.ts). Rolls into
+ *                    `blink_points` per the 5→4 column contract.
+ *   - 'tweet'      — reserved; x-post.ts does not call awardPoints yet.
+ */
+export type { Channel };
 
 export interface PointAwardResult {
   success: boolean;
@@ -18,6 +44,7 @@ export interface BatchAwardItem {
   protocolId: string;
   idempotencyKey: string;
   reason?: string;
+  channel?: Channel;
 }
 
 export interface BatchItemResult {
@@ -47,6 +74,7 @@ export async function awardPoints(
   protocolId: string | null,
   source: { type: "signature" | "reference" | "completion"; key: string },
   reason?: string,
+  channel: Channel = "completion",
 ): Promise<PointAwardResult> {
   const client = await pool.connect();
 
@@ -96,10 +124,18 @@ export async function awardPoints(
         : null;
 
     const insertResult = await client.query<{ id: string }>(
-      `INSERT INTO point_events (user_wallet, protocol_id, type, amount, source_signature, source_reference, reason)
-       VALUES ($1, $2, 'awarded', $3, $4, $5, $6)
+      `INSERT INTO point_events (user_wallet, protocol_id, type, amount, source_signature, source_reference, reason, channel)
+       VALUES ($1, $2, 'awarded', $3, $4, $5, $6, $7)
        RETURNING id`,
-      [wallet, protocolId, amount, signatureVal, referenceVal, reason ?? null],
+      [
+        wallet,
+        protocolId,
+        amount,
+        signatureVal,
+        referenceVal,
+        reason ?? null,
+        channel,
+      ],
     );
 
     const eventId = insertResult.rows[0].id;
@@ -132,6 +168,48 @@ export async function awardPoints(
        WHERE wallet_address = $1`,
       [wallet, newBalance],
     );
+
+    // Season-score hooks: fold this award into the active season's
+    // protocol + per-user rollups. Graceful degrade rules:
+    //   * protocolId null (e.g. unresolved zealy webhook) → skip
+    //   * no active season configured → skip
+    // The upserts run on `client` so they share the SAME transaction as
+    // the point_event insert and a rollback zeroes everything out.
+    // `getActiveSeason()` uses a separate read-only connection — that's
+    // fine because seasons are pre-created and never mid-tx.
+    if (protocolId !== null) {
+      const season = await getActiveSeason();
+      if (season) {
+        // Count awards in this tx for (wallet, protocolId). A count of 1
+        // means this insert is the user's first award for this protocol
+        // in the season — used to bump unique_users_rewarded exactly once.
+        const countResult = await client.query<{ count: string }>(
+          `SELECT COUNT(*)::text AS count
+             FROM point_events
+            WHERE user_wallet = $1
+              AND protocol_id = $2`,
+          [wallet, protocolId],
+        );
+        const isFirstAwardForUser =
+          BigInt(countResult.rows[0].count) === BigInt(1);
+
+        await upsertProtocolScore(
+          client,
+          season.id,
+          protocolId,
+          channel,
+          amount,
+          isFirstAwardForUser,
+        );
+        await upsertUserSeasonScore(
+          client,
+          season.id,
+          wallet,
+          channel,
+          amount,
+        );
+      }
+    }
 
     await client.query("COMMIT");
 
