@@ -321,11 +321,18 @@ export async function batchAward(
 
   const client = await pool.connect();
 
+  // Resolve the active season once for the whole batch. `getActiveSeason`
+  // uses the module pool and runs outside this batch's tx — that's fine
+  // because seasons are pre-created and never written mid-batch.
+  const season = await getActiveSeason();
+
   try {
     await client.query("BEGIN");
 
     for (const award of awards) {
       try {
+        const channel: Channel = award.channel ?? "api";
+
         // Idempotency check
         const dupCheck = await client.query<{ id: string }>(
           `SELECT id FROM point_events WHERE source_reference = $1 LIMIT 1`,
@@ -361,8 +368,8 @@ export async function batchAward(
 
         // Insert point event
         const insertResult = await client.query<{ id: string }>(
-          `INSERT INTO point_events (user_wallet, protocol_id, type, amount, source_reference, reason)
-           VALUES ($1, $2, 'awarded', $3, $4, $5)
+          `INSERT INTO point_events (user_wallet, protocol_id, type, amount, source_reference, reason, channel)
+           VALUES ($1, $2, 'awarded', $3, $4, $5, $6)
            RETURNING id`,
           [
             award.wallet,
@@ -370,6 +377,7 @@ export async function batchAward(
             award.amount,
             award.idempotencyKey,
             award.reason ?? null,
+            channel,
           ],
         );
 
@@ -402,6 +410,38 @@ export async function batchAward(
            WHERE wallet_address = $1`,
           [award.wallet, newBalance],
         );
+
+        // Season-score hooks: fold this award into the active season's
+        // protocol + per-user rollups. protocolId comes from BatchAwardItem
+        // and is required — unlike awardPoints, batchAward doesn't accept
+        // null. No-op when the session has no active season.
+        if (season && award.protocolId) {
+          const countResult = await client.query<{ count: string }>(
+            `SELECT COUNT(*)::text AS count
+               FROM point_events
+              WHERE user_wallet = $1
+                AND protocol_id = $2`,
+            [award.wallet, award.protocolId],
+          );
+          const isFirstAwardForUser =
+            BigInt(countResult.rows[0].count) === BigInt(1);
+
+          await upsertProtocolScore(
+            client,
+            season.id,
+            award.protocolId,
+            channel,
+            award.amount,
+            isFirstAwardForUser,
+          );
+          await upsertUserSeasonScore(
+            client,
+            season.id,
+            award.wallet,
+            channel,
+            award.amount,
+          );
+        }
 
         succeeded++;
         results.push({
