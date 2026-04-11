@@ -180,15 +180,21 @@ export async function awardPoints(
     if (protocolId !== null) {
       const season = await getActiveSeason();
       if (season) {
-        // Count awards in this tx for (wallet, protocolId). A count of 1
-        // means this insert is the user's first award for this protocol
-        // in the season — used to bump unique_users_rewarded exactly once.
+        // Count awards in this tx for (wallet, protocolId) WITHIN THIS
+        // SEASON. A count of 1 means this insert is the user's first
+        // award for this protocol in the active season — used to bump
+        // unique_users_rewarded exactly once per season. Scoping by
+        // season.start_at is critical: a returning user from a prior
+        // season would otherwise count as >1 and the new season's
+        // unique_users_rewarded would never tick up for them.
+        // TODO-0016 §"Season model" requires per-season scoping.
         const countResult = await client.query<{ count: string }>(
           `SELECT COUNT(*)::text AS count
              FROM point_events
             WHERE user_wallet = $1
-              AND protocol_id = $2`,
-          [wallet, protocolId],
+              AND protocol_id = $2
+              AND created_at >= $3`,
+          [wallet, protocolId, season.startAt],
         );
         const isFirstAwardForUser =
           BigInt(countResult.rows[0].count) === BigInt(1);
@@ -201,13 +207,7 @@ export async function awardPoints(
           amount,
           isFirstAwardForUser,
         );
-        await upsertUserSeasonScore(
-          client,
-          season.id,
-          wallet,
-          channel,
-          amount,
-        );
+        await upsertUserSeasonScore(client, season.id, wallet, channel, amount);
       }
     }
 
@@ -321,13 +321,15 @@ export async function batchAward(
 
   const client = await pool.connect();
 
-  // Resolve the active season once for the whole batch. `getActiveSeason`
-  // uses the module pool and runs outside this batch's tx — that's fine
-  // because seasons are pre-created and never written mid-batch.
-  const season = await getActiveSeason();
-
   try {
     await client.query("BEGIN");
+
+    // Resolve the active season once for the whole batch. Run INSIDE
+    // the try block so a transient failure (DB hiccup, pool pressure)
+    // is caught by the outer catch and the pg client is released via
+    // the finally below — running this before `try` leaks the client
+    // when the lookup throws.
+    const season = await getActiveSeason();
 
     for (const award of awards) {
       try {
@@ -416,12 +418,18 @@ export async function batchAward(
         // and is required — unlike awardPoints, batchAward doesn't accept
         // null. No-op when the session has no active season.
         if (season && award.protocolId) {
+          // Scope the "first award for this user" heuristic to the
+          // active season. Without the season-scope filter, a returning
+          // user from a prior season would permanently fail to bump the
+          // new season's unique_users_rewarded. TODO-0016 §"Season
+          // model" requires per-season isolation.
           const countResult = await client.query<{ count: string }>(
             `SELECT COUNT(*)::text AS count
                FROM point_events
               WHERE user_wallet = $1
-                AND protocol_id = $2`,
-            [award.wallet, award.protocolId],
+                AND protocol_id = $2
+                AND created_at >= $3`,
+            [award.wallet, award.protocolId, season.startAt],
           );
           const isFirstAwardForUser =
             BigInt(countResult.rows[0].count) === BigInt(1);
