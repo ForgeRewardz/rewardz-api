@@ -234,9 +234,28 @@ registerAdapter(completionGenericV1);
  * bypasses the zod schema. A future housekeeping pass should move
  * this into config.ts so the pubkey shape is validated.
  */
-const REWARDZ_MVP_PROGRAM_ID =
-  process.env.REWARDZ_MVP_PROGRAM_ID ??
+const REWARDZ_MVP_PROGRAM_ID_FIXTURE_FALLBACK =
   "RewardzMVP11111111111111111111111111111111111";
+
+const REWARDZ_MVP_PROGRAM_ID =
+  process.env.REWARDZ_MVP_PROGRAM_ID ?? REWARDZ_MVP_PROGRAM_ID_FIXTURE_FALLBACK;
+
+if (
+  REWARDZ_MVP_PROGRAM_ID === REWARDZ_MVP_PROGRAM_ID_FIXTURE_FALLBACK &&
+  process.env.NODE_ENV !== "test" &&
+  process.env.REWARDZ_MVP_PROGRAM_ID === undefined
+) {
+  // Boot-time warning: without a real env var the Steel adapters will
+  // fail-closed (no production tx has the fixture id) and the 404 reason
+  // becomes the misleading "No userStake instruction found". Advertise
+  // the drift so ops can grep the boot log and set the env var. A future
+  // housekeeping pass should move REWARDZ_MVP_PROGRAM_ID into config.ts
+  // behind a zod schema so the pubkey shape is validated at startup.
+  // eslint-disable-next-line no-console
+  console.warn(
+    "[verifier] REWARDZ_MVP_PROGRAM_ID is unset — stake.steel.v1 and mint.steel.v1 adapters will fall back to the SDK fixture id and reject every real transaction. Set REWARDZ_MVP_PROGRAM_ID in .env before accepting production blinks.",
+  );
+}
 
 /**
  * Discriminator for `userStake` — Steel / Pinocchio emit a single
@@ -288,9 +307,7 @@ function extractRewardzIxDataSlices(
 ): Uint8Array[] {
   const slices: Uint8Array[] = [];
   const message = tx.transaction.message;
-  const accountKeys = message.getAccountKeys
-    ? message.getAccountKeys()
-    : null;
+  const accountKeys = message.getAccountKeys ? message.getAccountKeys() : null;
 
   const programIdFor = (idx: number): string | null => {
     if (accountKeys) {
@@ -359,11 +376,7 @@ function readU64LE(data: Uint8Array, offset: number): bigint {
       `data slice too short for u64 at offset ${offset}: ${data.length} bytes`,
     );
   }
-  const view = new DataView(
-    data.buffer,
-    data.byteOffset + offset,
-    8,
-  );
+  const view = new DataView(data.buffer, data.byteOffset + offset, 8);
   return view.getBigUint64(0, true);
 }
 
@@ -477,16 +490,15 @@ registerAdapter(stakeSteelV1);
  * Decodes a `burnToMint` instruction from the rewardz-mvp Steel
  * program. Layout is identical to userStake (1 discriminator byte +
  * 8 little-endian u64 bytes) but the discriminator is 17 and the
- * arg is `nonce` rather than `amount`. The decoded nonce surfaces
- * in `meta.nonce` so downstream dedupe / replay-prevention can
- * cross-check it against the stored mintAttempt PDA.
+ * arg is `nonce` rather than `amount`.
  *
- * PDA cross-check: optional in MVP. When
- * `expectedReference` is set we derive `findProgramAddressSync`
- * (['mintAttempt', payer, nonceLE], programId) via the SDK's
- * derivePda helper and assert it matches. When unset, decoding is
- * sufficient — the stake-side caller can still confirm eligibility
- * by nonce uniqueness alone.
+ * After decoding, we derive the `mintAttempt` PDA from
+ * `[literal "mint_attempt", payer, nonce_u64_LE]` under
+ * `REWARDZ_MVP_PROGRAM_ID` and `getAccountInfo` on it — the rewardz-mvp
+ * program initialises that PDA in `burnToMint` to mark the attempt
+ * consumed, so a non-null account with data > 0 proves the tx landed
+ * successfully. This is the nonce-replay / "fresh PDA" guarantee plan
+ * v2 task 71 calls out explicitly.
  */
 const mintSteelV1: VerificationAdapter = {
   id: "mint.steel.v1",
@@ -512,13 +524,56 @@ const mintSteelV1: VerificationAdapter = {
               reason: `burnToMint decode failed: ${err instanceof Error ? err.message : String(err)}`,
             };
           }
-          return {
-            ok: true,
-            meta: {
-              discriminator: BURN_TO_MINT_DISCRIMINATOR,
-              nonce: nonce.toString(),
-            },
-          };
+
+          // PDA cross-check — plan v2 task 71. Derive the mintAttempt
+          // PDA from [literal "mint_attempt", payer, nonce_u64_LE] and
+          // confirm it was created on-chain by this tx. If the program
+          // id is the fixture fallback this call silently misses (the
+          // account is not on devnet) so the adapter fails-closed.
+          try {
+            const payerKey = new PublicKey(args.expectedWallet);
+            const programKey = new PublicKey(REWARDZ_MVP_PROGRAM_ID);
+            const nonceBytes = new Uint8Array(8);
+            new DataView(nonceBytes.buffer).setBigUint64(0, nonce, true);
+            const [mintAttemptPda] = PublicKey.findProgramAddressSync(
+              [
+                Buffer.from("mint_attempt", "utf8"),
+                payerKey.toBytes(),
+                nonceBytes,
+              ],
+              programKey,
+            );
+            const connection = new Connection(args.rpcUrl, "confirmed");
+            const info = await connection.getAccountInfo(
+              mintAttemptPda,
+              "confirmed",
+            );
+            if (!info || info.data.length === 0) {
+              return {
+                ok: false,
+                reason: `mint.steel.v1: mintAttempt PDA ${mintAttemptPda.toBase58()} not initialised on-chain (burnToMint may have landed but program state does not reflect it)`,
+              };
+            }
+            if (!info.owner.equals(programKey)) {
+              return {
+                ok: false,
+                reason: `mint.steel.v1: mintAttempt PDA owned by ${info.owner.toBase58()}, expected ${programKey.toBase58()}`,
+              };
+            }
+            return {
+              ok: true,
+              meta: {
+                discriminator: BURN_TO_MINT_DISCRIMINATOR,
+                nonce: nonce.toString(),
+                mintAttemptPda: mintAttemptPda.toBase58(),
+              },
+            };
+          } catch (pdaErr) {
+            return {
+              ok: false,
+              reason: `mint.steel.v1: PDA cross-check failed: ${pdaErr instanceof Error ? pdaErr.message : String(pdaErr)}`,
+            };
+          }
         }
       }
 

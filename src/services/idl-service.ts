@@ -33,7 +33,16 @@ export interface UploadIdlResult {
 
 export interface InstructionPreview {
   name: string;
-  classification: InstructionClassification;
+  /**
+   * Classification buckets produced by the SDK classifier. Omitted when
+   * the classifier could not bucket the instruction (ambiguous or
+   * unrecognised shape); in that case `error` carries the reason so the
+   * console can render a per-row banner without special-casing a magic
+   * key on the classification object itself.
+   */
+  classification?: InstructionClassification;
+  /** Populated iff classification could not be computed. */
+  error?: string;
 }
 
 export interface ListInstructionsResult {
@@ -155,19 +164,11 @@ export async function listInstructions(
     } catch (err) {
       // Ambiguous-classifier errors surface per-instruction so the
       // admin can break the tie via hints without losing the rest of
-      // the preview. Wrap the reason in the classification field's
-      // args bucket as a placeholder so the caller can still render
-      // the row with an error banner.
+      // the preview. Emit an explicit `error` field rather than a
+      // synthetic classification so the console can show a row-level
+      // banner without probing a magic key.
       const reason = err instanceof Error ? err.message : String(err);
-      instructions.push({
-        name,
-        classification: {
-          accounts: {},
-          args: { __error__: "fixed" },
-          // eslint-disable-next-line @typescript-eslint/no-explicit-any
-          ...({ __error__: reason } as any),
-        },
-      });
+      instructions.push({ name, error: reason });
     }
   }
 
