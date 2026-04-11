@@ -59,6 +59,15 @@ export async function zealyRoutes(app: FastifyInstance): Promise<void> {
           });
       }
 
+      // Resolve the owning protocol from the webhook secret. When the
+      // ZEALY_DEFAULT_SECRET matches we have no per-protocol binding, so
+      // `protocolId` stays null and the season-score hooks inside
+      // awardPoints become a no-op (graceful degrade — see points-service
+      // task 14). When a per-protocol api_key_hash matches we capture
+      // the id and thread it through so leaderboards update for that
+      // protocol.
+      let protocolId: string | null = null;
+
       try {
         // Verify webhook secret (timing-safe comparison)
         let secretValid = false;
@@ -78,7 +87,10 @@ export async function zealyRoutes(app: FastifyInstance): Promise<void> {
              AND api_key_hash = $1`,
             [crypto.createHash("sha256").update(body.secret).digest("hex")],
           );
-          secretValid = (protocolResult.rowCount ?? 0) > 0;
+          if ((protocolResult.rowCount ?? 0) > 0) {
+            secretValid = true;
+            protocolId = protocolResult.rows[0].id;
+          }
         }
 
         if (!secretValid) {
@@ -113,13 +125,17 @@ export async function zealyRoutes(app: FastifyInstance): Promise<void> {
         // Default points for Zealy quest completions
         const defaultPoints = BigInt(100);
 
-        // Award points with idempotency on webhook event ID
+        // Award points with idempotency on webhook event ID. When
+        // protocolId is null (ZEALY_DEFAULT_SECRET path) the season-score
+        // hook inside awardPoints skips silently — no leaderboard rollups
+        // are possible without a protocol binding.
         await awardPoints(
           wallet,
           defaultPoints,
-          null,
+          protocolId,
           { type: "reference", key: `zealy:${body.id}` },
           `Zealy quest ${body.data.questId} completed`,
+          "webhook",
         );
 
         return reply.status(200).send({ status: "ok" });
