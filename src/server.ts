@@ -16,6 +16,7 @@ import { subscriptionRoutes } from "./routes/subscriptions.js";
 import { questRoutes } from "./routes/quests.js";
 import { leaderboardRoutes } from "./routes/leaderboards.js";
 import { adminRoutes } from "./routes/admin.js";
+import { campaignRoutes } from "./routes/campaigns.js";
 import { healthRoutes } from "./routes/health.js";
 
 export function buildApp() {
@@ -56,6 +57,7 @@ export function buildApp() {
   app.register(questRoutes, { prefix: "/v1" });
   app.register(leaderboardRoutes, { prefix: "/v1" });
   app.register(adminRoutes, { prefix: "/v1" });
+  app.register(campaignRoutes, { prefix: "/v1" });
 
   // Health check at root (no prefix)
   app.register(healthRoutes);
