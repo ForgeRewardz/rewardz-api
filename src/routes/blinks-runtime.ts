@@ -463,6 +463,32 @@ export async function blinksRuntimeRoutes(
     Body: ActionPostRequest;
     Querystring: Record<string, string>;
   }>("/blinks/:protocolId/:instructionSlug", postHandler);
+
+  /* ---------------------------------------------------------------------- */
+  /*  OPTIONS (75c): preflight                                              */
+  /* ---------------------------------------------------------------------- */
+
+  const optionsHandler = async (
+    _request: FastifyRequest,
+    reply: FastifyReply,
+  ) => {
+    // The cors-actions onRequest hook already attaches the headers
+    // and short-circuits the reply with 204. If we somehow reach
+    // this handler (because the hook didn't match or was bypassed
+    // by a path typo), emit the headers + 204 ourselves as a
+    // defensive fallback.
+    applyActionsCorsHeaders(reply);
+    return reply.status(204).send();
+  };
+
+  app.options<{ Params: BlinkRouteParams }>(
+    "/blinks/:protocolId/:instructionSlug/:fixedAccountsHash",
+    optionsHandler,
+  );
+  app.options<{ Params: BlinkRouteParams }>(
+    "/blinks/:protocolId/:instructionSlug",
+    optionsHandler,
+  );
 }
 
 export default blinksRuntimeRoutes;
