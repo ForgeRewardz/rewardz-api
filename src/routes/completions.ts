@@ -1,7 +1,7 @@
 import crypto from "node:crypto";
 import type { FastifyInstance, FastifyRequest, FastifyReply } from "fastify";
 import { requireWalletAuth } from "../middleware/auth.js";
-import { verifyCompletion } from "../services/verifier.js";
+import { dispatchVerification } from "../services/verifier.js";
 import { awardPoints } from "../services/points-service.js";
 import { query } from "../db/client.js";
 import { config } from "../config.js";
@@ -149,14 +149,17 @@ export async function completionRoutes(app: FastifyInstance): Promise<void> {
 
         void (async () => {
           try {
-            const verification = await verifyCompletion(
-              txSignature,
-              walletAddress,
-              expectedRef,
-              config.SOLANA_RPC_URL,
+            const verification = await dispatchVerification(
+              "completion.generic.v1",
+              {
+                signature: txSignature,
+                expectedWallet: walletAddress,
+                expectedReference: expectedRef,
+                rpcUrl: config.SOLANA_RPC_URL,
+              },
             );
 
-            if (verification.verified) {
+            if (verification.ok) {
               await query(
                 `UPDATE completions SET status = 'awarded', verified_at = NOW() WHERE id = $1`,
                 [completionId],
@@ -185,7 +188,7 @@ export async function completionRoutes(app: FastifyInstance): Promise<void> {
             } else {
               await query(
                 `UPDATE completions SET status = 'rejected', rejection_reason = $1 WHERE id = $2`,
-                [verification.reason ?? "Verification failed", completionId],
+                [verification.reason, completionId],
               );
             }
           } catch (err) {
