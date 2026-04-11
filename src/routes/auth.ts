@@ -418,8 +418,6 @@ export async function authRoutes(app: FastifyInstance): Promise<void> {
       //
       // Shape: `{ revoked: true }` so the console can optimistically
       // clear its session even without reading the body.
-      //
-      // biome-ignore lint/suspicious/noConsole: explicit return
       return reply.status(200).send({ revoked: true });
     },
   );
