@@ -106,17 +106,25 @@ export async function consumeNonce(
  * Bind a JWT jti to a consumed auth session row. Called by
  * /v1/auth/verify after issuing the JWT so the jti can be revoked on
  * logout.
+ *
+ * Defence-in-depth: the UPDATE guards on `jwt_jti IS NULL` so a second
+ * bind on the same session row is a no-op instead of silently
+ * overwriting the first jti. Returns `true` if a row was bound,
+ * `false` if the session row was already bound (or doesn't exist).
+ * /v1/auth/verify treats a `false` return as a replay attempt.
  */
 export async function bindJtiToSession(
   sessionId: string,
   jti: string,
-): Promise<void> {
-  await query(
+): Promise<boolean> {
+  const result = await query(
     `UPDATE protocol_auth_sessions
         SET jwt_jti = $1
-      WHERE id = $2`,
+      WHERE id = $2
+        AND jwt_jti IS NULL`,
     [jti, sessionId],
   );
+  return (result.rowCount ?? 0) > 0;
 }
 
 /**

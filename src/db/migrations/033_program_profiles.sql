@@ -1,6 +1,12 @@
 -- program_profiles stores the per-account seed templates the blink
 -- compiler uses to derive PDAs at request time. One row per
--- (protocol, program_id) pair. The seeds_jsonb structure is:
+-- (protocol, program_id) pair.
+--
+-- Authoritative DSL spec:
+--   mobileSpecs/.claude/kernel-outlines/outline-plan-2026-04-11-phase5-v2.md §15G
+--   ("Seed DSL for user-PDA accounts" / five-source DSL)
+--
+-- The seeds_jsonb structure is:
 --   {
 --     "<accountName>": [
 --       { "kind": "literal",      "value": "stake"          },

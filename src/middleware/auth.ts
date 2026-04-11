@@ -32,6 +32,14 @@ function unauthorized(reply: FastifyReply, message: string): void {
   reply.status(401).send({ error: "Unauthorized", message });
 }
 
+function forbidden(reply: FastifyReply, message: string): void {
+  reply.status(403).send({ error: "Forbidden", message });
+}
+
+function notFound(reply: FastifyReply, message: string): void {
+  reply.status(404).send({ error: "Not Found", message });
+}
+
 /* -------------------------------------------------------------------------- */
 /*  1. API-key auth – look up protocol by hashed key                          */
 /* -------------------------------------------------------------------------- */
@@ -297,11 +305,11 @@ export async function requireAdminAuth(
 ): Promise<void> {
   const wallet = request.walletAddress;
   if (!wallet) {
-    reply.status(401).send({ error: "authentication required" });
+    unauthorized(reply, "Authentication required");
     return;
   }
   if (!config.ADMIN_WALLETS.includes(wallet)) {
-    reply.status(403).send({ error: "admin access required" });
+    forbidden(reply, "Admin access required");
     return;
   }
 }
@@ -324,7 +332,7 @@ export async function requireProtocolOwner(
 ): Promise<void> {
   const wallet = request.walletAddress;
   if (!wallet) {
-    reply.status(401).send({ error: "authentication required" });
+    unauthorized(reply, "Authentication required");
     return;
   }
 
@@ -335,11 +343,11 @@ export async function requireProtocolOwner(
   );
 
   if (result.rowCount === 0) {
-    reply.status(404).send({ error: "protocol not found" });
+    notFound(reply, "Protocol not found");
     return;
   }
   if (result.rows[0].admin_wallet !== wallet) {
-    reply.status(403).send({ error: "protocol access denied" });
+    forbidden(reply, "Protocol access denied");
     return;
   }
 }
