@@ -318,7 +318,10 @@ export async function campaignRoutes(app: FastifyInstance): Promise<void> {
         }
       }
 
-      const setClauses: string[] = ["updated_at = NOW()"];
+      // campaigns has no updated_at column (005 schema), so we don't
+      // stamp one. Empty-body rejection is handled below after we
+      // finish populating setClauses.
+      const setClauses: string[] = [];
       const params: unknown[] = [];
       let idx = 1;
 
@@ -373,10 +376,7 @@ export async function campaignRoutes(app: FastifyInstance): Promise<void> {
         params.push(body.status);
       }
 
-      // Only the status-is-the-only-field edge-case can reach here with
-      // an effectively empty update (updated_at-only). Reject empty
-      // bodies up front so callers don't silently no-op.
-      if (setClauses.length === 1) {
+      if (setClauses.length === 0) {
         return badRequest(reply, "At least one field to update is required");
       }
 
