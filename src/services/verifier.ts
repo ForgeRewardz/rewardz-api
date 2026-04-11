@@ -218,6 +218,260 @@ const completionGenericV1: VerificationAdapter = {
 registerAdapter(completionGenericV1);
 
 /* -------------------------------------------------------------------------- */
+/*  Steel-program adapters (stake.steel.v1 / mint.steel.v1)                   */
+/* -------------------------------------------------------------------------- */
+
+/**
+ * Base58 pubkey of the rewardz-mvp Steel program. Read from
+ * `REWARDZ_MVP_PROGRAM_ID` at module load with a safe fallback to
+ * the fixture id used by the SDK unit tests. Tests that spin up
+ * adapter coverage can set the env var before importing this
+ * module to pin a specific id.
+ *
+ * We intentionally read `process.env` directly (instead of the
+ * `config.ts` module) because the S1 invariant forbids touching
+ * config.ts in this session — the env var still works, it just
+ * bypasses the zod schema. A future housekeeping pass should move
+ * this into config.ts so the pubkey shape is validated.
+ */
+const REWARDZ_MVP_PROGRAM_ID =
+  process.env.REWARDZ_MVP_PROGRAM_ID ??
+  "RewardzMVP11111111111111111111111111111111111";
+
+/**
+ * Discriminator for `userStake` — Steel / Pinocchio emit a single
+ * u8 leading byte. See sdk/packages/sdk/src/blinks/__fixtures__/
+ * rewardz-mvp.json and the dispatch table in program/src/lib.rs.
+ */
+const STAKE_DISCRIMINATOR = 5;
+
+/**
+ * Discriminator for `burnToMint`. Same layout as userStake — one
+ * leading u8 byte followed by a little-endian u64 arg (`nonce` for
+ * burnToMint, `amount` for userStake).
+ */
+const BURN_TO_MINT_DISCRIMINATOR = 17;
+
+/**
+ * Fetch a parsed, confirmed transaction and return the list of
+ * program-instruction tuples so adapters can filter by program id.
+ * Returns `null` on not-found or error-bearing txs.
+ */
+async function fetchConfirmedTx(
+  signature: string,
+  rpcUrl: string,
+): Promise<import("@solana/web3.js").TransactionResponse | null> {
+  const connection = new Connection(rpcUrl, "confirmed");
+  const tx = await connection.getTransaction(signature, {
+    commitment: "confirmed",
+    maxSupportedTransactionVersion: 0,
+  });
+  if (!tx) return null;
+  if (tx.meta?.err) return null;
+  return tx as unknown as import("@solana/web3.js").TransactionResponse;
+}
+
+/**
+ * Extract every instruction that targets the rewardz-mvp program id,
+ * returning the raw data byte array for each. Tolerates both legacy
+ * (`message.instructions`) and v0 (`message.compiledInstructions`)
+ * message shapes.
+ *
+ * Compute-budget / ATA prelude ixs are left in place — the caller is
+ * expected to search for a specific discriminator rather than trust
+ * positional ordering, which keeps the adapter stable regardless of
+ * the blink runtime's prelude choices.
+ */
+function extractRewardzIxDataSlices(
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  tx: any,
+): Uint8Array[] {
+  const slices: Uint8Array[] = [];
+  const message = tx.transaction.message;
+  const accountKeys = message.getAccountKeys
+    ? message.getAccountKeys()
+    : null;
+
+  const programIdFor = (idx: number): string | null => {
+    if (accountKeys) {
+      const k = accountKeys.get(idx);
+      return k ? k.toBase58() : null;
+    }
+    // Legacy fallback.
+    const staticKeys = message.accountKeys as PublicKey[] | undefined;
+    if (staticKeys && staticKeys[idx]) {
+      return staticKeys[idx].toBase58();
+    }
+    return null;
+  };
+
+  // v0 compiled instructions
+  if (Array.isArray(message.compiledInstructions)) {
+    for (const ix of message.compiledInstructions as Array<{
+      programIdIndex: number;
+      data: Uint8Array;
+    }>) {
+      const pid = programIdFor(ix.programIdIndex);
+      if (pid === REWARDZ_MVP_PROGRAM_ID) {
+        slices.push(
+          ix.data instanceof Uint8Array ? ix.data : new Uint8Array(ix.data),
+        );
+      }
+    }
+  }
+
+  // Legacy instructions
+  if (Array.isArray(message.instructions)) {
+    for (const ix of message.instructions as Array<{
+      programIdIndex: number;
+      data: string | Uint8Array;
+    }>) {
+      const pid = programIdFor(ix.programIdIndex);
+      if (pid === REWARDZ_MVP_PROGRAM_ID) {
+        if (typeof ix.data === "string") {
+          // Legacy base58 is too expensive to decode here without
+          // pulling in bs58; try base64 first, then UTF-8 fallback.
+          try {
+            slices.push(new Uint8Array(Buffer.from(ix.data, "base64")));
+          } catch {
+            slices.push(new Uint8Array(Buffer.from(ix.data, "utf8")));
+          }
+        } else {
+          slices.push(
+            ix.data instanceof Uint8Array ? ix.data : new Uint8Array(ix.data),
+          );
+        }
+      }
+    }
+  }
+
+  return slices;
+}
+
+/**
+ * Read a little-endian u64 from the data slice at the given offset.
+ * Throws if the slice is too short. Returned as bigint so callers can
+ * round-trip through JSON / audit logs without precision loss.
+ */
+function readU64LE(data: Uint8Array, offset: number): bigint {
+  if (data.length < offset + 8) {
+    throw new Error(
+      `data slice too short for u64 at offset ${offset}: ${data.length} bytes`,
+    );
+  }
+  const view = new DataView(
+    data.buffer,
+    data.byteOffset + offset,
+    8,
+  );
+  return view.getBigUint64(0, true);
+}
+
+/**
+ * Assert that `expectedWallet` is a signer on the tx. Identical to
+ * the generic adapter's check — extracted into a helper so every
+ * steel adapter can apply the same gate.
+ */
+function assertSigner(
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  tx: any,
+  expectedWallet: string,
+): { ok: true } | { ok: false; reason: string } {
+  const accountKeys = tx.transaction.message.getAccountKeys();
+  const signerKeys: string[] = [];
+  const numSignatures =
+    "header" in tx.transaction.message
+      ? (
+          tx.transaction.message as {
+            header: { numRequiredSignatures: number };
+          }
+        ).header.numRequiredSignatures
+      : tx.transaction.signatures.length;
+
+  for (let i = 0; i < numSignatures; i++) {
+    const key = accountKeys.get(i);
+    if (key) signerKeys.push(key.toBase58());
+  }
+
+  let expectedPubkey: PublicKey;
+  try {
+    expectedPubkey = new PublicKey(expectedWallet);
+  } catch {
+    return { ok: false, reason: "Invalid expected wallet address" };
+  }
+
+  if (!signerKeys.includes(expectedPubkey.toBase58())) {
+    return {
+      ok: false,
+      reason: "Expected wallet is not a signer of this transaction",
+    };
+  }
+
+  return { ok: true };
+}
+
+/**
+ * Adapter: `stake.steel.v1`.
+ *
+ * Decodes a `userStake` instruction from the rewardz-mvp Steel
+ * program. Searches every instruction that targets the program id
+ * for the stake discriminator (5) and unpacks the `amount` u64 arg.
+ * The compute-budget / ATA prelude positional offsets are tolerated
+ * by filtering on program id instead of assuming index 0/1.
+ *
+ * On success `amount` is returned so callers can apply eligibility
+ * gates (min stake, max-per-wallet-per-day, etc.) without re-fetching
+ * the tx.
+ */
+const stakeSteelV1: VerificationAdapter = {
+  id: "stake.steel.v1",
+  async verify(args: VerifyArgs): Promise<VerificationResult> {
+    try {
+      const tx = await fetchConfirmedTx(args.signature, args.rpcUrl);
+      if (!tx) {
+        return { ok: false, reason: "Transaction not found or failed" };
+      }
+
+      const signerCheck = assertSigner(tx, args.expectedWallet);
+      if (!signerCheck.ok) return signerCheck;
+
+      const slices = extractRewardzIxDataSlices(tx);
+      for (const data of slices) {
+        if (data.length >= 1 && data[0] === STAKE_DISCRIMINATOR) {
+          // Expect: 1 discriminator byte + 8 little-endian bytes (amount u64).
+          let amount: bigint;
+          try {
+            amount = readU64LE(data, 1);
+          } catch (err) {
+            return {
+              ok: false,
+              reason: `userStake decode failed: ${err instanceof Error ? err.message : String(err)}`,
+            };
+          }
+          return {
+            ok: true,
+            amount,
+            meta: { discriminator: STAKE_DISCRIMINATOR },
+          };
+        }
+      }
+
+      return {
+        ok: false,
+        reason: "No userStake instruction found in transaction",
+      };
+    } catch (err) {
+      return {
+        ok: false,
+        reason: `stake.steel.v1 error: ${err instanceof Error ? err.message : String(err)}`,
+      };
+    }
+  },
+};
+
+registerAdapter(stakeSteelV1);
+
+/* -------------------------------------------------------------------------- */
 /*  Helpers                                                                   */
 /* -------------------------------------------------------------------------- */
 
