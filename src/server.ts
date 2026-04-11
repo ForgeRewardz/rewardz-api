@@ -1,6 +1,8 @@
 import Fastify from "fastify";
 import cors from "@fastify/cors";
 import { config } from "./config.js";
+import { wireAuthSessionRevocation } from "./services/auth-sessions.js";
+import { authRoutes } from "./routes/auth.js";
 import { intentRoutes } from "./routes/intents.js";
 import { completionRoutes } from "./routes/completions.js";
 import { offerRoutes } from "./routes/offers.js";
@@ -19,12 +21,28 @@ import { healthRoutes } from "./routes/health.js";
 export function buildApp() {
   const app = Fastify({ logger: true });
 
+  // Wire the real DB-backed jti revocation check into requireBearerAuth
+  // BEFORE any routes register. This is idempotent and safe to call on
+  // every buildApp() because it just reassigns a module-level function
+  // reference — tests that rebuild the app between cases still share
+  // the one true implementation. Plan task 38 + plan task 10 discipline.
+  wireAuthSessionRevocation();
+
   const allowedOrigins = config.ALLOWED_ORIGINS
     ? config.ALLOWED_ORIGINS.split(",").map((o) => o.trim())
     : ["http://localhost:3000"];
   app.register(cors, { origin: allowedOrigins });
 
   // Route plugins with /v1 prefix
+  //
+  // NOTE FOR H2 (campaigns): `/v1/protocols/:id/*` routes inside
+  // `protocolRoutes` opt into `requireBearerAuth + requireProtocolOwner`
+  // at their own `preHandler` — the new `POST /v1/protocols/:id/campaigns`
+  // route you're adding should do the same. Do NOT register a parent-
+  // scope auth hook here that would double-gate, and do NOT gate
+  // `POST /v1/protocols/register` (that stays public via the legacy
+  // wallet-header auth so new protocols can onboard without a JWT).
+  app.register(authRoutes, { prefix: "/v1" });
   app.register(intentRoutes, { prefix: "/v1" });
   app.register(completionRoutes, { prefix: "/v1" });
   app.register(offerRoutes, { prefix: "/v1" });

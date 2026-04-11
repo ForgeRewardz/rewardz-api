@@ -1,6 +1,10 @@
 import crypto from "node:crypto";
 import type { FastifyInstance, FastifyRequest, FastifyReply } from "fastify";
-import { requireWalletAuth, requireApiKey } from "../middleware/auth.js";
+import {
+  requireWalletAuth,
+  requireBearerAuth,
+  requireProtocolOwner,
+} from "../middleware/auth.js";
 import { query } from "../db/client.js";
 
 /* -------------------------------------------------------------------------- */
@@ -122,21 +126,21 @@ export async function protocolRoutes(app: FastifyInstance): Promise<void> {
     },
   );
 
-  /* ------ PATCH /protocols/:id ------ */
-  app.patch(
+  /* ------ PATCH /protocols/:id ------
+   *
+   * Protected by `requireBearerAuth + requireProtocolOwner` (plan task
+   * 38). The old API-key gate is retired for :id/* routes — the
+   * console flow exclusively uses wallet-signed JWTs from
+   * /v1/auth/verify. External protocols that still need API-key
+   * access should call the channel-specific routes under
+   * /v1/points/* instead.
+   */
+  app.patch<{ Params: ProtocolParams; Body: PatchBody }>(
     "/protocols/:id",
-    { preHandler: [requireApiKey] },
-    async (request: FastifyRequest, reply: FastifyReply) => {
-      const { id } = request.params as ProtocolParams;
+    { preHandler: [requireBearerAuth, requireProtocolOwner] },
+    async (request, reply) => {
+      const { id } = request.params;
       const body = request.body as PatchBody | undefined;
-
-      // Verify the API key belongs to this protocol
-      if (request.protocolId !== id) {
-        return reply.status(401).send({
-          error: "Unauthorized",
-          message: "API key does not match this protocol",
-        });
-      }
 
       if (
         !body ||
@@ -198,21 +202,17 @@ export async function protocolRoutes(app: FastifyInstance): Promise<void> {
     },
   );
 
-  /* ------ POST /protocols/:id/quests ------ */
-  app.post(
+  /* ------ POST /protocols/:id/quests ------
+   *
+   * Protected by `requireBearerAuth + requireProtocolOwner` (plan task
+   * 38). Same rationale as PATCH /protocols/:id above.
+   */
+  app.post<{ Params: ProtocolParams; Body: CreateQuestBody }>(
     "/protocols/:id/quests",
-    { preHandler: [requireApiKey] },
-    async (request: FastifyRequest, reply: FastifyReply) => {
-      const { id } = request.params as ProtocolParams;
+    { preHandler: [requireBearerAuth, requireProtocolOwner] },
+    async (request, reply) => {
+      const { id } = request.params;
       const body = request.body as CreateQuestBody | undefined;
-
-      // Verify the API key belongs to this protocol
-      if (request.protocolId !== id) {
-        return reply.status(401).send({
-          error: "Unauthorized",
-          message: "API key does not match this protocol",
-        });
-      }
 
       if (!body?.name) {
         return reply
