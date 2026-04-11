@@ -32,7 +32,34 @@ export function buildApp() {
   const allowedOrigins = config.ALLOWED_ORIGINS
     ? config.ALLOWED_ORIGINS.split(",").map((o) => o.trim())
     : ["http://localhost:3000"];
-  app.register(cors, { origin: allowedOrigins });
+
+  // CORS exemption for Solana Actions routes (Klaus A5):
+  // `/v1/blinks/*` and `/actions.json` are hit by dial.to (which
+  // sends a `null` / `https://dial.to` origin and expects a fully
+  // permissive ACTIONS_CORS_HEADERS set including
+  // `Access-Control-Allow-Private-Network: true`). The global CORS
+  // allowlist above is scoped to the protocol-console origins and
+  // would reject dial.to with a plain 403, so we short-circuit the
+  // @fastify/cors plugin for blink paths and let the custom
+  // `cors-actions` middleware handle them instead.
+  //
+  // Mechanism: a `delegator` function returns a per-request CORS
+  // config. For blink paths we return `{ preflight: false,
+  // hideOptionsRoute: false, origin: false }`, which tells
+  // @fastify/cors to emit no headers and not intercept OPTIONS —
+  // leaving both to the cors-actions onRequest hook registered
+  // below. For every other path we return the original allowlist.
+  const isBlinkPath = (url: string): boolean =>
+    url.startsWith("/v1/blinks") || url === "/actions.json";
+  app.register(cors, {
+    delegator: (req, cb) => {
+      if (isBlinkPath(req.url)) {
+        cb(null, { origin: false, preflight: false });
+        return;
+      }
+      cb(null, { origin: allowedOrigins });
+    },
+  });
 
   // Route plugins with /v1 prefix
   //
