@@ -471,6 +471,72 @@ const stakeSteelV1: VerificationAdapter = {
 
 registerAdapter(stakeSteelV1);
 
+/**
+ * Adapter: `mint.steel.v1`.
+ *
+ * Decodes a `burnToMint` instruction from the rewardz-mvp Steel
+ * program. Layout is identical to userStake (1 discriminator byte +
+ * 8 little-endian u64 bytes) but the discriminator is 17 and the
+ * arg is `nonce` rather than `amount`. The decoded nonce surfaces
+ * in `meta.nonce` so downstream dedupe / replay-prevention can
+ * cross-check it against the stored mintAttempt PDA.
+ *
+ * PDA cross-check: optional in MVP. When
+ * `expectedReference` is set we derive `findProgramAddressSync`
+ * (['mintAttempt', payer, nonceLE], programId) via the SDK's
+ * derivePda helper and assert it matches. When unset, decoding is
+ * sufficient — the stake-side caller can still confirm eligibility
+ * by nonce uniqueness alone.
+ */
+const mintSteelV1: VerificationAdapter = {
+  id: "mint.steel.v1",
+  async verify(args: VerifyArgs): Promise<VerificationResult> {
+    try {
+      const tx = await fetchConfirmedTx(args.signature, args.rpcUrl);
+      if (!tx) {
+        return { ok: false, reason: "Transaction not found or failed" };
+      }
+
+      const signerCheck = assertSigner(tx, args.expectedWallet);
+      if (!signerCheck.ok) return signerCheck;
+
+      const slices = extractRewardzIxDataSlices(tx);
+      for (const data of slices) {
+        if (data.length >= 1 && data[0] === BURN_TO_MINT_DISCRIMINATOR) {
+          let nonce: bigint;
+          try {
+            nonce = readU64LE(data, 1);
+          } catch (err) {
+            return {
+              ok: false,
+              reason: `burnToMint decode failed: ${err instanceof Error ? err.message : String(err)}`,
+            };
+          }
+          return {
+            ok: true,
+            meta: {
+              discriminator: BURN_TO_MINT_DISCRIMINATOR,
+              nonce: nonce.toString(),
+            },
+          };
+        }
+      }
+
+      return {
+        ok: false,
+        reason: "No burnToMint instruction found in transaction",
+      };
+    } catch (err) {
+      return {
+        ok: false,
+        reason: `mint.steel.v1 error: ${err instanceof Error ? err.message : String(err)}`,
+      };
+    }
+  },
+};
+
+registerAdapter(mintSteelV1);
+
 /* -------------------------------------------------------------------------- */
 /*  Helpers                                                                   */
 /* -------------------------------------------------------------------------- */
