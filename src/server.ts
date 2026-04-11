@@ -12,6 +12,8 @@ import { delegationRoutes } from "./routes/delegations.js";
 import { protocolRoutes } from "./routes/protocols.js";
 import { subscriptionRoutes } from "./routes/subscriptions.js";
 import { questRoutes } from "./routes/quests.js";
+import { leaderboardRoutes } from "./routes/leaderboards.js";
+import { adminRoutes } from "./routes/admin.js";
 import { healthRoutes } from "./routes/health.js";
 
 export function buildApp() {
@@ -34,6 +36,8 @@ export function buildApp() {
   app.register(protocolRoutes, { prefix: "/v1" });
   app.register(subscriptionRoutes, { prefix: "/v1" });
   app.register(questRoutes, { prefix: "/v1" });
+  app.register(leaderboardRoutes, { prefix: "/v1" });
+  app.register(adminRoutes, { prefix: "/v1" });
 
   // Health check at root (no prefix)
   app.register(healthRoutes);
