@@ -71,6 +71,11 @@ export async function xPostRoutes(app: FastifyInstance): Promise<void> {
           });
         }
 
+        // TODO(tweet-channel): wire channel='tweet' into awardPoints when
+        // the upstream tweet-verification pipeline that owns tweet
+        // awarding lands. Today tweet_submissions is inserted in 'pending'
+        // state and no call path reaches awardPoints, so the 'tweet'
+        // channel on the DB enum is a reserved no-op (see migration 036).
         const result = await query<{ id: string }>(
           `INSERT INTO tweet_submissions (tweet_id, tweet_url, user_wallet, protocol_id, rule_id, status)
            VALUES ($1, $2, $3, $4, $5, 'pending')

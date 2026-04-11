@@ -182,6 +182,7 @@ export async function pointRoutes(app: FastifyInstance): Promise<void> {
           request.protocolId ?? null,
           { type: "reference", key: body.idempotency_key },
           body.reason,
+          "api",
         );
 
         return reply.status(200).send({
@@ -254,6 +255,7 @@ export async function pointRoutes(app: FastifyInstance): Promise<void> {
           protocolId: request.protocolId ?? "",
           idempotencyKey: a.idempotency_key,
           reason: a.reason,
+          channel: "api" as const,
         }));
 
         const result = await batchAward(items);

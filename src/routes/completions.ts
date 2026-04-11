@@ -179,6 +179,7 @@ export async function completionRoutes(app: FastifyInstance): Promise<void> {
                   protocolId,
                   { type: "completion", key: completionId },
                   "Completion verified",
+                  "blink",
                 );
               }
             } else {

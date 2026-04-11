@@ -378,6 +378,7 @@ export async function questRoutes(app: FastifyInstance): Promise<void> {
                 questResult.rows[0].created_by,
                 { type: "reference", key: `quest:${id}:${walletAddress}` },
                 `Quest ${id} completed`,
+                "completion",
               );
             }
           }
