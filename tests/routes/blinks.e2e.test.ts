@@ -76,7 +76,7 @@ const SYSTEM_PROGRAM = "11111111111111111111111111111111";
 const TOKEN_PROGRAM = "TokenkegQfeZyiNwAJbNbGKPFXCWuBvf9Ss623VQ5DA";
 const REWARD_MINT = "RwMint1111111111111111111111111111111111111A";
 
-const REWARDZ_PROGRAM_ID = "RewardzMVP11111111111111111111111111111111111";
+const REWARDZ_PROGRAM_ID = "Fxe49DwqpdSRRpQpv7zm3QwtxaAYcbWurG6ntBZifb4Z";
 
 // -----------------------------------------------------------------------------
 // Fixture loader: reuse the SDK's rewardz-mvp.json so the api/ test doesn't

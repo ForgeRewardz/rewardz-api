@@ -28,7 +28,6 @@ import { z } from "zod";
 import type {
   ClassificationHints,
   FixedAccounts,
-  InstructionClassification,
   MintOwnerMap,
 } from "@rewardz/sdk/blinks";
 import { requireBearerAuth, requireProtocolOwner } from "../middleware/auth.js";
@@ -46,7 +45,6 @@ interface ProtocolParams {
 interface PublishBlinkBody {
   idlId: string;
   instructionName: string;
-  classification: InstructionClassification;
   fixedAccounts: FixedAccounts;
   verificationAdapter: string;
   programId: string;
@@ -82,7 +80,7 @@ const classificationSchema = z.object({
 const publishBodySchema = z.object({
   idlId: z.string().uuid(),
   instructionName: z.string().min(1),
-  classification: classificationSchema,
+  classification: classificationSchema.optional(),
   fixedAccounts: z.record(z.string(), z.string()),
   verificationAdapter: z.string().min(1),
   programId: z.string().min(1),
@@ -152,7 +150,6 @@ export async function blinksPublishRoutes(
           protocolId,
           idlId: body.idlId,
           instructionName: body.instructionName,
-          classification: body.classification,
           fixedAccounts: body.fixedAccounts,
           programProfile,
           verificationAdapter: body.verificationAdapter,

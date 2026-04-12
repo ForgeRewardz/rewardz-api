@@ -235,7 +235,7 @@ registerAdapter(completionGenericV1);
  * this into config.ts so the pubkey shape is validated.
  */
 const REWARDZ_MVP_PROGRAM_ID_FIXTURE_FALLBACK =
-  "RewardzMVP11111111111111111111111111111111111";
+  "Fxe49DwqpdSRRpQpv7zm3QwtxaAYcbWurG6ntBZifb4Z";
 
 const REWARDZ_MVP_PROGRAM_ID =
   process.env.REWARDZ_MVP_PROGRAM_ID ?? REWARDZ_MVP_PROGRAM_ID_FIXTURE_FALLBACK;

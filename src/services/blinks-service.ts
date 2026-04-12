@@ -25,9 +25,9 @@ import {
   type BlinkManifest,
   buildManifest,
   type ClassificationHints,
+  classifyInstruction,
   type CodamaRootNode,
   type FixedAccounts,
-  type InstructionClassification,
   type MintOwnerMap,
   type ProgramProfile,
 } from "@rewardz/sdk/blinks";
@@ -41,7 +41,6 @@ export interface PublishBlinkArgs {
   protocolId: string;
   idlId: string;
   instructionName: string;
-  classification: InstructionClassification;
   fixedAccounts: FixedAccounts;
   programProfile?: ProgramProfile;
   verificationAdapter: string;
@@ -52,7 +51,12 @@ export interface PublishBlinkArgs {
    * MVP cut — devnet RPC probing is explicitly out of scope.
    */
   mintOwners?: MintOwnerMap;
-  /** Optional classification hints for the SDK's builder step. */
+  /**
+   * Classification hints passed to the SDK classifier. The publish
+   * path re-runs the classifier server-side (not trusting the client)
+   * so these hints are the admin's only lever for overriding default
+   * bucket assignments.
+   */
   hints?: ClassificationHints;
 }
 
@@ -137,14 +141,21 @@ export async function publishBlink(
 
   const rootNode = idlRow.rows[0].normalised_json;
 
-  // Hand the SDK builder everything it needs. The SDK's
-  // buildManifest returns mintOwners === {} because RPC probing
-  // happens here in api/ — not in the RPC-agnostic subpath.
+  // Re-run the classifier server-side so the multi-payer guard and
+  // all other invariants fire on the ACTUAL IDL + hints, not on a
+  // client-supplied classification that may have been hand-crafted.
+  // The classifier is the single source of truth (Klaus B3).
+  const classification = classifyInstruction(
+    rootNode,
+    args.instructionName,
+    args.hints,
+  );
+
   const manifest = buildManifest({
     rootNode,
     instructionName: args.instructionName,
     protocolId: args.protocolId,
-    classification: args.classification,
+    classification,
     fixedAccounts: args.fixedAccounts,
     programProfile: args.programProfile,
     verificationAdapter: args.verificationAdapter,

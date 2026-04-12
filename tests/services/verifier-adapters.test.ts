@@ -28,7 +28,7 @@ process.env.ADMIN_WALLETS ??= "11111111111111111111111111111111";
 // Pin the program id used by the adapters so synthetic txs decode
 // against a known constant regardless of any local .env drift.
 process.env.REWARDZ_MVP_PROGRAM_ID =
-  "RewardzMVP11111111111111111111111111111111111";
+  "Fxe49DwqpdSRRpQpv7zm3QwtxaAYcbWurG6ntBZifb4Z";
 
 import {
   afterAll,
@@ -47,7 +47,7 @@ let verifier: VerifierModule;
 const SKIP = !process.env.TEST_DATABASE_URL;
 
 const PAYER = "So11111111111111111111111111111111111111112";
-const REWARDZ_PROGRAM_ID = "RewardzMVP11111111111111111111111111111111111";
+const REWARDZ_PROGRAM_ID = "Fxe49DwqpdSRRpQpv7zm3QwtxaAYcbWurG6ntBZifb4Z";
 const COMPUTE_BUDGET_PROGRAM_ID =
   "ComputeBudget111111111111111111111111111111";
 
