@@ -218,7 +218,7 @@ const completionGenericV1: VerificationAdapter = {
 registerAdapter(completionGenericV1);
 
 /* -------------------------------------------------------------------------- */
-/*  Steel-program adapters (stake.steel.v1 / mint.steel.v1)                   */
+/*  Rewardz program adapters (stake.steel.v1 / mining.game.v1)                */
 /* -------------------------------------------------------------------------- */
 
 /**
@@ -235,7 +235,7 @@ registerAdapter(completionGenericV1);
  * this into config.ts so the pubkey shape is validated.
  */
 const REWARDZ_MVP_PROGRAM_ID_FIXTURE_FALLBACK =
-  "Fxe49DwqpdSRRpQpv7zm3QwtxaAYcbWurG6ntBZifb4Z";
+  "mineHEHyaVbQAkcPDDCuCSbkfGNid1RVz6GzcEgSVTh";
 
 const REWARDZ_MVP_PROGRAM_ID =
   process.env.REWARDZ_MVP_PROGRAM_ID ?? REWARDZ_MVP_PROGRAM_ID_FIXTURE_FALLBACK;
@@ -253,7 +253,7 @@ if (
   // behind a zod schema so the pubkey shape is validated at startup.
   // eslint-disable-next-line no-console
   console.warn(
-    "[verifier] REWARDZ_MVP_PROGRAM_ID is unset — stake.steel.v1 and mint.steel.v1 adapters will fall back to the SDK fixture id and reject every real transaction. Set REWARDZ_MVP_PROGRAM_ID in .env before accepting production blinks.",
+    "[verifier] REWARDZ_MVP_PROGRAM_ID is unset — stake.steel.v1 and mining.game.v1 adapters will fall back to the SDK fixture id and reject every real transaction. Set REWARDZ_MVP_PROGRAM_ID in .env before accepting production blinks.",
   );
 }
 
@@ -265,11 +265,10 @@ if (
 const STAKE_DISCRIMINATOR = 5;
 
 /**
- * Discriminator for `burnToMint`. Same layout as userStake — one
- * leading u8 byte followed by a little-endian u64 arg (`nonce` for
- * burnToMint, `amount` for userStake).
+ * Discriminator for `deployToRound`. Same leading-u8 layout as
+ * userStake, followed by a little-endian u64 `points` arg.
  */
-const BURN_TO_MINT_DISCRIMINATOR = 17;
+const DEPLOY_TO_ROUND_DISCRIMINATOR = 20;
 
 /**
  * Fetch a parsed, confirmed transaction and return the list of
@@ -485,23 +484,16 @@ const stakeSteelV1: VerificationAdapter = {
 registerAdapter(stakeSteelV1);
 
 /**
- * Adapter: `mint.steel.v1`.
+ * Adapter: `mining.game.v1`.
  *
- * Decodes a `burnToMint` instruction from the rewardz-mvp Steel
- * program. Layout is identical to userStake (1 discriminator byte +
- * 8 little-endian u64 bytes) but the discriminator is 17 and the
- * arg is `nonce` rather than `amount`.
- *
- * After decoding, we derive the `mintAttempt` PDA from
- * `[literal "mint_attempt", payer, nonce_u64_LE]` under
- * `REWARDZ_MVP_PROGRAM_ID` and `getAccountInfo` on it — the rewardz-mvp
- * program initialises that PDA in `burnToMint` to mark the attempt
- * consumed, so a non-null account with data > 0 proves the tx landed
- * successfully. This is the nonce-replay / "fresh PDA" guarantee plan
- * v2 task 71 calls out explicitly.
+ * Decodes a `deployToRound` instruction from the rewardz-mvp program.
+ * Layout is one discriminator byte (20) plus an 8-byte little-endian
+ * `points` amount. The playerDeployment PDA itself is an account in
+ * the instruction, because its seed includes the active round id and
+ * the blink URL does not carry that id as an instruction arg.
  */
-const mintSteelV1: VerificationAdapter = {
-  id: "mint.steel.v1",
+const miningGameV1: VerificationAdapter = {
+  id: "mining.game.v1",
   async verify(args: VerifyArgs): Promise<VerificationResult> {
     try {
       const tx = await fetchConfirmedTx(args.signature, args.rpcUrl);
@@ -514,83 +506,42 @@ const mintSteelV1: VerificationAdapter = {
 
       const slices = extractRewardzIxDataSlices(tx);
       for (const data of slices) {
-        if (data.length >= 1 && data[0] === BURN_TO_MINT_DISCRIMINATOR) {
-          let nonce: bigint;
+        if (data.length >= 1 && data[0] === DEPLOY_TO_ROUND_DISCRIMINATOR) {
+          let points: bigint;
           try {
-            nonce = readU64LE(data, 1);
+            points = readU64LE(data, 1);
           } catch (err) {
             return {
               ok: false,
-              reason: `burnToMint decode failed: ${err instanceof Error ? err.message : String(err)}`,
+              reason: `deployToRound decode failed: ${err instanceof Error ? err.message : String(err)}`,
             };
           }
 
-          // PDA cross-check — plan v2 task 71. Derive the mintAttempt
-          // PDA from [literal "mint_attempt", payer, nonce_u64_LE] and
-          // confirm it was created on-chain by this tx. If the program
-          // id is the fixture fallback this call silently misses (the
-          // account is not on devnet) so the adapter fails-closed.
-          try {
-            const payerKey = new PublicKey(args.expectedWallet);
-            const programKey = new PublicKey(REWARDZ_MVP_PROGRAM_ID);
-            const nonceBytes = new Uint8Array(8);
-            new DataView(nonceBytes.buffer).setBigUint64(0, nonce, true);
-            const [mintAttemptPda] = PublicKey.findProgramAddressSync(
-              [
-                Buffer.from("mint_attempt", "utf8"),
-                payerKey.toBytes(),
-                nonceBytes,
-              ],
-              programKey,
-            );
-            const connection = new Connection(args.rpcUrl, "confirmed");
-            const info = await connection.getAccountInfo(
-              mintAttemptPda,
-              "confirmed",
-            );
-            if (!info || info.data.length === 0) {
-              return {
-                ok: false,
-                reason: `mint.steel.v1: mintAttempt PDA ${mintAttemptPda.toBase58()} not initialised on-chain (burnToMint may have landed but program state does not reflect it)`,
-              };
-            }
-            if (!info.owner.equals(programKey)) {
-              return {
-                ok: false,
-                reason: `mint.steel.v1: mintAttempt PDA owned by ${info.owner.toBase58()}, expected ${programKey.toBase58()}`,
-              };
-            }
-            return {
-              ok: true,
-              meta: {
-                discriminator: BURN_TO_MINT_DISCRIMINATOR,
-                nonce: nonce.toString(),
-                mintAttemptPda: mintAttemptPda.toBase58(),
-              },
-            };
-          } catch (pdaErr) {
-            return {
-              ok: false,
-              reason: `mint.steel.v1: PDA cross-check failed: ${pdaErr instanceof Error ? pdaErr.message : String(pdaErr)}`,
-            };
-          }
+          return {
+            ok: true,
+            amount: points,
+            meta: {
+              discriminator: DEPLOY_TO_ROUND_DISCRIMINATOR,
+              points: points.toString(),
+            },
+          };
         }
       }
 
       return {
         ok: false,
-        reason: "No burnToMint instruction found in transaction",
+        reason: "No deployToRound instruction found in transaction",
       };
     } catch (err) {
       return {
         ok: false,
-        reason: `mint.steel.v1 error: ${err instanceof Error ? err.message : String(err)}`,
+        reason: `mining.game.v1 error: ${err instanceof Error ? err.message : String(err)}`,
       };
     }
   },
 };
 
-registerAdapter(mintSteelV1);
+registerAdapter(miningGameV1);
 
 /* -------------------------------------------------------------------------- */
 /*  Helpers                                                                   */

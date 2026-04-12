@@ -12,12 +12,12 @@ describe("Migration files", () => {
     .filter((f) => f.endsWith(".sql"))
     .sort();
 
-  it("should have exactly 36 migration files", () => {
-    expect(files.length).toBe(36);
+  it("should have exactly 37 migration files", () => {
+    expect(files.length).toBe(37);
   });
 
-  it("should have filenames in correct order (001-036)", () => {
-    for (let i = 0; i < 36; i++) {
+  it("should have filenames in correct order (001-037)", () => {
+    for (let i = 0; i < 37; i++) {
       const expected = String(i + 1).padStart(3, "0");
       expect(files[i]).toMatch(new RegExp(`^${expected}_`));
     }
@@ -73,6 +73,7 @@ describe("Migration files", () => {
       "032_protocol_idls.sql": "protocol_idls",
       "033_program_profiles.sql": "program_profiles",
       "034_protocol_blinks.sql": "protocol_blinks",
+      "037_game_rounds.sql": "game_rounds",
     };
 
     // Migrations that do NOT create a table — each must define a regex the

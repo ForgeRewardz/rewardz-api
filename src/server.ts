@@ -8,6 +8,7 @@ import { intentRoutes } from "./routes/intents.js";
 import { completionRoutes } from "./routes/completions.js";
 import { offerRoutes } from "./routes/offers.js";
 import { pointRoutes } from "./routes/points.js";
+import { gameRoutes } from "./routes/game.js";
 import { xPostRoutes } from "./routes/x-post.js";
 import { zealyRoutes } from "./routes/zealy.js";
 import { telegramRoutes } from "./routes/telegram.js";
@@ -89,6 +90,7 @@ export function buildApp() {
   app.register(completionRoutes, { prefix: "/v1" });
   app.register(offerRoutes, { prefix: "/v1" });
   app.register(pointRoutes, { prefix: "/v1" });
+  app.register(gameRoutes, { prefix: "/v1" });
   app.register(xPostRoutes, { prefix: "/v1" });
   app.register(zealyRoutes, { prefix: "/v1" });
   app.register(telegramRoutes, { prefix: "/v1" });

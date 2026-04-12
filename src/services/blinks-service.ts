@@ -80,7 +80,7 @@ export interface ListedBlink {
  */
 export const KNOWN_VERIFICATION_ADAPTERS = [
   "stake.steel.v1",
-  "mint.steel.v1",
+  "mining.game.v1",
   "completion.generic.v1",
 ] as const;
 

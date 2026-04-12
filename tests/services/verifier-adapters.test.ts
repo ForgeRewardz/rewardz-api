@@ -5,7 +5,7 @@
  *
  *   - completion.generic.v1 is registered at module load
  *   - stake.steel.v1 decodes userStake discriminator + amount
- *   - mint.steel.v1 decodes burnToMint discriminator + nonce
+ *   - mining.game.v1 decodes deployToRound discriminator + points
  *   - dispatchVerification("unknown.adapter.v0", ...) throws
  *
  * The steel adapters fetch txs via @solana/web3.js Connection.
@@ -28,7 +28,7 @@ process.env.ADMIN_WALLETS ??= "11111111111111111111111111111111";
 // Pin the program id used by the adapters so synthetic txs decode
 // against a known constant regardless of any local .env drift.
 process.env.REWARDZ_MVP_PROGRAM_ID =
-  "Fxe49DwqpdSRRpQpv7zm3QwtxaAYcbWurG6ntBZifb4Z";
+  "mineHEHyaVbQAkcPDDCuCSbkfGNid1RVz6GzcEgSVTh";
 
 import {
   afterAll,
@@ -47,7 +47,7 @@ let verifier: VerifierModule;
 const SKIP = !process.env.TEST_DATABASE_URL;
 
 const PAYER = "So11111111111111111111111111111111111111112";
-const REWARDZ_PROGRAM_ID = "Fxe49DwqpdSRRpQpv7zm3QwtxaAYcbWurG6ntBZifb4Z";
+const REWARDZ_PROGRAM_ID = "mineHEHyaVbQAkcPDDCuCSbkfGNid1RVz6GzcEgSVTh";
 const COMPUTE_BUDGET_PROGRAM_ID =
   "ComputeBudget111111111111111111111111111111";
 
@@ -136,11 +136,11 @@ describe.skipIf(SKIP)("verifier adapters", () => {
   /*  Registry                                                          */
   /* ------------------------------------------------------------------ */
 
-  it("registers completion.generic.v1, stake.steel.v1, mint.steel.v1 at boot", () => {
+  it("registers completion.generic.v1, stake.steel.v1, mining.game.v1 at boot", () => {
     const ids = verifier.listAdapters();
     expect(ids).toContain("completion.generic.v1");
     expect(ids).toContain("stake.steel.v1");
-    expect(ids).toContain("mint.steel.v1");
+    expect(ids).toContain("mining.game.v1");
     expect(ids.length).toBe(3);
   });
 
@@ -206,13 +206,13 @@ describe.skipIf(SKIP)("verifier adapters", () => {
   });
 
   /* ------------------------------------------------------------------ */
-  /*  mint.steel.v1                                                     */
+  /*  mining.game.v1                                                    */
   /* ------------------------------------------------------------------ */
 
-  it("mint.steel.v1 decodes a synthetic burnToMint tx and returns nonce in meta", async () => {
-    installTxStub(() => makeSyntheticTx(17, 42n));
+  it("mining.game.v1 decodes a synthetic deployToRound tx and returns points", async () => {
+    installTxStub(() => makeSyntheticTx(20, 42n));
 
-    const result = await verifier.dispatchVerification("mint.steel.v1", {
+    const result = await verifier.dispatchVerification("mining.game.v1", {
       signature: "sig",
       expectedWallet: PAYER,
       rpcUrl: "http://localhost:9999",
@@ -220,15 +220,16 @@ describe.skipIf(SKIP)("verifier adapters", () => {
 
     expect(result.ok).toBe(true);
     if (result.ok) {
-      expect(result.meta?.discriminator).toBe(17);
-      expect(result.meta?.nonce).toBe("42");
+      expect(result.amount).toBe(42n);
+      expect(result.meta?.discriminator).toBe(20);
+      expect(result.meta?.points).toBe("42");
     }
   });
 
-  it("mint.steel.v1 rejects a tx missing the burnToMint discriminator", async () => {
+  it("mining.game.v1 rejects a tx missing the deployToRound discriminator", async () => {
     installTxStub(() => makeSyntheticTx(5, 42n));
 
-    const result = await verifier.dispatchVerification("mint.steel.v1", {
+    const result = await verifier.dispatchVerification("mining.game.v1", {
       signature: "sig",
       expectedWallet: PAYER,
       rpcUrl: "http://localhost:9999",
@@ -236,7 +237,7 @@ describe.skipIf(SKIP)("verifier adapters", () => {
 
     expect(result.ok).toBe(false);
     if (!result.ok) {
-      expect(result.reason).toMatch(/no burnToMint/i);
+      expect(result.reason).toMatch(/no deployToRound/i);
     }
   });
 

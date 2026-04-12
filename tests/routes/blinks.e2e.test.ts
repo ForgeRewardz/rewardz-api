@@ -13,7 +13,7 @@
  *      prelude + target ix with discriminator 5 + amount LE)
  *   6. OPTIONS the blink URL → assert the actions CORS headers are
  *      present including Access-Control-Allow-Private-Network
- *   7. Same flow for burnToMint (discriminator 17, no ATA prelude)
+ *   7. Same flow for deployToRound (discriminator 20, no ATA prelude)
  *   8. GET /actions.json → assert rules array contains both blinks
  *
  * Gated on `TEST_DATABASE_URL` via describe.skipIf so `pnpm test`
@@ -72,11 +72,14 @@ const PAYER_WALLET = "Es9vMFrzaCERmJfrF4H2FYD4KCoNkY11McCe8BenwNYB";
 // tests treat these as opaque strings, no on-curve assertions.
 const CONFIG_PUBKEY = "ConfigA111111111111111111111111111111111111A";
 const STAKE_VAULT_PUBKEY = "VaultA111111111111111111111111111111111111AA";
+const GAME_ROUND_PUBKEY = "RoundA111111111111111111111111111111111111AA";
+const PLAYER_DEPLOYMENT_PUBKEY = "PDA1111111111111111111111111111111111111111";
+const GAME_TREASURY_PUBKEY = "Treasury111111111111111111111111111111111111";
 const SYSTEM_PROGRAM = "11111111111111111111111111111111";
 const TOKEN_PROGRAM = "TokenkegQfeZyiNwAJbNbGKPFXCWuBvf9Ss623VQ5DA";
 const REWARD_MINT = "RwMint1111111111111111111111111111111111111A";
 
-const REWARDZ_PROGRAM_ID = "Fxe49DwqpdSRRpQpv7zm3QwtxaAYcbWurG6ntBZifb4Z";
+const REWARDZ_PROGRAM_ID = "mineHEHyaVbQAkcPDDCuCSbkfGNid1RVz6GzcEgSVTh";
 
 // -----------------------------------------------------------------------------
 // Fixture loader: reuse the SDK's rewardz-mvp.json so the api/ test doesn't
@@ -148,7 +151,7 @@ async function uploadIdlFixture(): Promise<string> {
   expect(res.statusCode).toBe(201);
   const body = res.json() as { idlId: string; instructions: string[] };
   expect(body.instructions).toContain("userStake");
-  expect(body.instructions).toContain("burnToMint");
+  expect(body.instructions).toContain("deployToRound");
   return body.idlId;
 }
 
@@ -164,13 +167,6 @@ async function upsertUserStakeProfile(): Promise<void> {
           seeds: [
             { kind: "literal", value: "user_stake" },
             { kind: "payer" },
-          ],
-        },
-        mintAttempt: {
-          seeds: [
-            { kind: "literal", value: "mint_attempt" },
-            { kind: "payer" },
-            { kind: "scalar_arg", name: "nonce" },
           ],
         },
       },
@@ -221,7 +217,7 @@ async function publishUserStakeBlink(idlId: string): Promise<{
   return manifest;
 }
 
-async function publishBurnToMintBlink(idlId: string): Promise<{
+async function publishDeployToRoundBlink(idlId: string): Promise<{
   instructionSlug: string;
   fixedAccountsHash: string;
 }> {
@@ -231,22 +227,27 @@ async function publishBurnToMintBlink(idlId: string): Promise<{
     headers: authHeader(OWNER_WALLET),
     payload: {
       idlId,
-      instructionName: "burnToMint",
+      instructionName: "deployToRound",
       classification: {
         accounts: {
           user: "payer",
-          config: "fixed",
+          gameConfig: "fixed",
+          gameRound: "fixed",
           userStake: "user-pda",
-          mintAttempt: "user-pda",
+          playerDeployment: "fixed",
+          treasury: "fixed",
           systemProgram: "fixed",
         },
-        args: { nonce: "user-input" },
+        args: { points: "user-input" },
       },
       fixedAccounts: {
-        config: CONFIG_PUBKEY,
+        gameConfig: CONFIG_PUBKEY,
+        gameRound: GAME_ROUND_PUBKEY,
+        playerDeployment: PLAYER_DEPLOYMENT_PUBKEY,
+        treasury: GAME_TREASURY_PUBKEY,
         systemProgram: SYSTEM_PROGRAM,
       },
-      verificationAdapter: "mint.steel.v1",
+      verificationAdapter: "mining.game.v1",
       programId: REWARDZ_PROGRAM_ID,
     },
   });
@@ -426,18 +427,18 @@ describe.skipIf(SKIP)("blinks e2e — §15G", () => {
   });
 
   /* -------------------------------------------------------------------- */
-  /*  6. burnToMint path (no ATA prelude)                                 */
+  /*  6. deployToRound path (no ATA prelude)                              */
   /* -------------------------------------------------------------------- */
 
-  it("POST /v1/blinks/... for burnToMint has discriminator 17 and no ATA prelude", async () => {
+  it("POST /v1/blinks/... for deployToRound has discriminator 20 and no ATA prelude", async () => {
     await seedProtocol();
     const idlId = await uploadIdlFixture();
     await upsertUserStakeProfile();
-    const manifest = await publishBurnToMintBlink(idlId);
+    const manifest = await publishDeployToRoundBlink(idlId);
 
     const res = await app.inject({
       method: "POST",
-      url: `/v1/blinks/${PROTOCOL_A}/${manifest.instructionSlug}/${manifest.fixedAccountsHash}?nonce=42`,
+      url: `/v1/blinks/${PROTOCOL_A}/${manifest.instructionSlug}/${manifest.fixedAccountsHash}?points=42`,
       payload: { account: PAYER_WALLET },
     });
     expect(res.statusCode).toBe(200);
@@ -456,11 +457,11 @@ describe.skipIf(SKIP)("blinks e2e — §15G", () => {
 
     const targetIx = message.compiledInstructions[rewardzIdx];
     const data = Buffer.from(targetIx.data);
-    expect(data[0]).toBe(17);
+    expect(data[0]).toBe(20);
     expect(data.length).toBe(9);
     expect(data.readBigUInt64LE(1)).toBe(42n);
 
-    // No ATA prelude expected for burnToMint (no user-ata accounts).
+    // No ATA prelude expected for deployToRound (no user-ata accounts).
     const ataIdxs = programIds.filter(
       (p) => p === "ATokenGPvbdGVxr1b2hvZbsiqW5xWH25efTNsLJA8knL",
     );
@@ -476,7 +477,7 @@ describe.skipIf(SKIP)("blinks e2e — §15G", () => {
     const idlId = await uploadIdlFixture();
     await upsertUserStakeProfile();
     const stake = await publishUserStakeBlink(idlId);
-    const mint = await publishBurnToMintBlink(idlId);
+    const deploy = await publishDeployToRoundBlink(idlId);
 
     const res = await app.inject({ method: "GET", url: "/actions.json" });
     expect(res.statusCode).toBe(200);
@@ -493,7 +494,7 @@ describe.skipIf(SKIP)("blinks e2e — §15G", () => {
       paths.some(
         (p) =>
           p ===
-          `/v1/blinks/${PROTOCOL_A}/${mint.instructionSlug}/${mint.fixedAccountsHash}`,
+          `/v1/blinks/${PROTOCOL_A}/${deploy.instructionSlug}/${deploy.fixedAccountsHash}`,
       ),
     ).toBe(true);
 
