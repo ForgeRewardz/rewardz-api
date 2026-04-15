@@ -12,12 +12,12 @@ describe("Migration files", () => {
     .filter((f) => f.endsWith(".sql"))
     .sort();
 
-  it("should have exactly 37 migration files", () => {
-    expect(files.length).toBe(37);
+  it("should have exactly 38 migration files", () => {
+    expect(files.length).toBe(38);
   });
 
-  it("should have filenames in correct order (001-037)", () => {
-    for (let i = 0; i < 37; i++) {
+  it("should have filenames in correct order (001-038)", () => {
+    for (let i = 0; i < 38; i++) {
       const expected = String(i + 1).padStart(3, "0");
       expect(files[i]).toMatch(new RegExp(`^${expected}_`));
     }
@@ -85,6 +85,8 @@ describe("Migration files", () => {
         /ALTER TABLE\s+campaigns[\s\S]*ADD COLUMN\s+verification_config/i,
       "036_point_events_channel.sql":
         /ALTER TABLE\s+point_events[\s\S]*ADD COLUMN\s+channel/i,
+      "038_game_rounds_settle_snapshot.sql":
+        /ALTER TABLE\s+game_rounds[\s\S]*ADD COLUMN\s+IF NOT EXISTS\s+settle_timestamp/i,
     };
 
     for (const file of files) {
