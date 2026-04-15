@@ -1,16 +1,16 @@
 import { PublicKey } from "@solana/web3.js";
+import { GameRoundStatus, MiningResultKind } from "@rewardz/types";
 import { query } from "../db/client.js";
 import { keccak256 } from "./keccak256.js";
 
-export type GameRoundStatus =
-  | "waiting"
-  | "active"
-  | "settling"
-  | "settled"
-  | "skipped";
+// Re-export shared enums so existing consumers importing from this module
+// don't break. Canonical definitions live in @rewardz/types.
+export { GameRoundStatus, MiningResultKind };
 
-export type MiningResultKind = "pending" | "hit" | "miss" | "skipped";
-
+// JSON-wire shapes for API responses. These are serialisations of the
+// canonical `GameRoundSummary` / `PlayerDeploymentStatus` in @rewardz/types:
+// bigints serialise to decimal strings, Dates to ISO-8601 strings. Field
+// names and optionality must match the canonical interfaces exactly.
 export interface GameRoundSummary {
   roundId: string;
   status: GameRoundStatus;
@@ -24,6 +24,9 @@ export interface GameRoundSummary {
   motherlodePool: string;
   motherlodeMinThreshold: string;
   motherlodeProbabilityBps: number;
+  settleTimestamp: string | null;
+  expiresAt: string | null;
+  refundMode: boolean;
 }
 
 export interface PlayerDeploymentStatus {
@@ -38,6 +41,8 @@ export interface PlayerDeploymentStatus {
   rewardAmount: string;
   motherlodeShare: string;
   claimed: boolean;
+  checkpointed: boolean;
+  checkpointFee: string | null;
 }
 
 export interface GameRoundResults {
@@ -68,6 +73,9 @@ interface GameRoundRow {
   motherlode_triggered: boolean;
   motherlode_amount: string;
   created_at: Date;
+  settle_timestamp: string | null;
+  expires_at: string | null;
+  refund_mode: boolean;
 }
 
 interface PlayerDeploymentRow {
@@ -81,6 +89,7 @@ interface PlayerDeploymentRow {
   motherlode_share: string;
   claimed: boolean;
   settled: boolean;
+  checkpointed: boolean;
 }
 
 function estimatedEndsAt(row: GameRoundRow): string | null {
@@ -88,6 +97,13 @@ function estimatedEndsAt(row: GameRoundRow): string | null {
   const slotDelta = Number(BigInt(row.end_slot) - BigInt(row.start_slot));
   if (!Number.isFinite(slotDelta) || slotDelta <= 0) return null;
   return new Date(row.created_at.getTime() + slotDelta * 400).toISOString();
+}
+
+function unixSecondsToIso(value: string | null): string | null {
+  if (value === null) return null;
+  const n = Number(value);
+  if (!Number.isFinite(n)) return null;
+  return new Date(n * 1000).toISOString();
 }
 
 function serialiseRound(row: GameRoundRow): GameRoundSummary {
@@ -104,14 +120,17 @@ function serialiseRound(row: GameRoundRow): GameRoundSummary {
     motherlodePool: row.motherlode_pool,
     motherlodeMinThreshold: row.motherlode_min_threshold,
     motherlodeProbabilityBps: row.motherlode_probability_bps,
+    settleTimestamp: unixSecondsToIso(row.settle_timestamp),
+    expiresAt: unixSecondsToIso(row.expires_at),
+    refundMode: row.refund_mode,
   };
 }
 
 function resultKind(row: PlayerDeploymentRow): MiningResultKind {
-  if (!row.settled) return "pending";
-  if (row.is_hit === true) return "hit";
-  if (row.is_hit === false) return "miss";
-  return "skipped";
+  if (!row.settled) return MiningResultKind.Pending;
+  if (row.is_hit === true) return MiningResultKind.Hit;
+  if (row.is_hit === false) return MiningResultKind.Miss;
+  return MiningResultKind.Skipped;
 }
 
 function serialisePlayer(row: PlayerDeploymentRow): PlayerDeploymentStatus {
@@ -127,6 +146,10 @@ function serialisePlayer(row: PlayerDeploymentRow): PlayerDeploymentStatus {
     rewardAmount: row.reward_amount,
     motherlodeShare: row.motherlode_share,
     claimed: row.claimed,
+    checkpointed: row.checkpointed,
+    // checkpointFee is not yet persisted in the DB — surfaced as null
+    // until a migration adds `checkpoint_fee` to player_deployments.
+    checkpointFee: null,
   };
 }
 
@@ -138,7 +161,7 @@ async function getPlayerDeployment(
   const result = await query<PlayerDeploymentRow>(
     `SELECT wallet_address, round_id::text, points_deployed::text,
             fee_paid::text, deployed_at, is_hit, reward_amount::text,
-            motherlode_share::text, claimed, settled
+            motherlode_share::text, claimed, settled, checkpointed
        FROM player_deployments
       WHERE round_id = $1 AND wallet_address = $2
       LIMIT 1`,
@@ -157,7 +180,8 @@ export async function getCurrentRound(walletAddress?: string): Promise<{
             tokens_per_round::text, motherlode_pool::text,
             motherlode_min_threshold::text, motherlode_probability_bps,
             hit_count, total_hit_points::text, tokens_minted::text,
-            motherlode_triggered, motherlode_amount::text, created_at
+            motherlode_triggered, motherlode_amount::text, created_at,
+            settle_timestamp::text, expires_at::text, refund_mode
        FROM game_rounds
       WHERE status IN ('waiting', 'active', 'settling')
       ORDER BY round_id DESC
@@ -184,7 +208,8 @@ export async function getRoundStatus(
             tokens_per_round::text, motherlode_pool::text,
             motherlode_min_threshold::text, motherlode_probability_bps,
             hit_count, total_hit_points::text, tokens_minted::text,
-            motherlode_triggered, motherlode_amount::text, created_at
+            motherlode_triggered, motherlode_amount::text, created_at,
+            settle_timestamp::text, expires_at::text, refund_mode
        FROM game_rounds
       WHERE round_id = $1
       LIMIT 1`,
@@ -225,7 +250,8 @@ export async function getRoundResults(
             tokens_per_round::text, motherlode_pool::text,
             motherlode_min_threshold::text, motherlode_probability_bps,
             hit_count, total_hit_points::text, tokens_minted::text,
-            motherlode_triggered, motherlode_amount::text, created_at
+            motherlode_triggered, motherlode_amount::text, created_at,
+            settle_timestamp::text, expires_at::text, refund_mode
        FROM game_rounds
       WHERE round_id = $1
       LIMIT 1`,
@@ -255,7 +281,8 @@ export async function getRoundHistory(
               tokens_per_round::text, motherlode_pool::text,
               motherlode_min_threshold::text, motherlode_probability_bps,
               hit_count, total_hit_points::text, tokens_minted::text,
-              motherlode_triggered, motherlode_amount::text, created_at
+              motherlode_triggered, motherlode_amount::text, created_at,
+            settle_timestamp::text, expires_at::text, refund_mode
          FROM game_rounds
         ORDER BY round_id DESC
         LIMIT $1 OFFSET $2`,
@@ -810,7 +837,9 @@ export async function applyGameEvent(
       // hit / reward accrue later via CheckpointRecorded. Refund-mode rounds
       // are surfaced as 'skipped' so the /v1/game/round/:id/status endpoint
       // can steer the client to the refund-claim flow.
-      const status: GameRoundStatus = event.refundMode ? "skipped" : "settled";
+      const status: GameRoundStatus = event.refundMode
+        ? GameRoundStatus.Skipped
+        : GameRoundStatus.Settled;
       await query(
         `UPDATE game_rounds
             SET status = $2,
