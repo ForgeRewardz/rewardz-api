@@ -137,6 +137,38 @@ All routes are prefixed with `/v1` unless noted otherwise.
 | POST   | `/v1/quests/:id/steps/:stepIndex/complete` | Wallet | Complete a quest step                              |
 | GET    | `/v1/quests/my`                            | Wallet | List joined quests                                 |
 
+### Mining Game
+
+Read-only views into the on-chain mining round. State is populated by the
+`game-event-listener` service as the on-chain program emits `RoundStarted` /
+`PlayerDeployed` / `RoundSettled` / `CheckpointRecorded` / `MotherlodeTriggered` /
+`RewardClaimed` logs (see `src/services/game-event-listener.ts`).
+
+| Method | Path                         | Auth | Description                                                                                                                    |
+| ------ | ---------------------------- | ---- | ------------------------------------------------------------------------------------------------------------------------------ |
+| GET    | `/v1/game/round/current`     | None | Latest round in `waiting` / `active` / `settling` status plus caller deployment (if `wallet=`)                                 |
+| GET    | `/v1/game/round/history`     | None | Paginated list of rounds (`limit` ≤ 100, default 20; `offset` default 0) ordered newest-first                                  |
+| GET    | `/v1/game/round/:id/status`  | None | Single round status plus caller deployment (if `wallet=`)                                                                      |
+| GET    | `/v1/game/round/:id/players` | None | `{ roundId, playerCount, player }` — total count + caller deployment only; per-wallet data stays private                       |
+| GET    | `/v1/game/round/:id/results` | None | Settled aggregate: `hitCount`, `totalHitPoints`, `tokensMinted`, `motherlodeTriggered`, `motherlodeAmount` + caller deployment |
+
+All endpoints accept an optional `wallet` query parameter (Base58 pubkey).
+When supplied the response includes the caller's `player` deployment row —
+`pointsDeployed`, `result` (`pending` / `hit` / `miss` / `skipped`),
+`isHit`, `rewardAmount`, `motherlodeShare`, `claimed`. Invalid round ids
+(non-positive integers) return `400 Bad Request`; unknown round ids return
+`404 Not Found`.
+
+Post-F3 semantics (three-step refactor): `RoundSettled` carries the
+`settle_timestamp` / `expires_at` / `refund_mode` / `total_points_deployed`
+snapshot only. Per-player `is_hit` / `reward_amount` is written by
+`CheckpointRecorded` as crankers (or the player themselves) run
+`checkpoint_round`. The `game-service.ts` TS port of
+`compute_player_hit` / reward-amount lets the API synthesize expected
+outcomes before the checkpoint instruction lands; the authoritative value
+overwrites when the event arrives. Fixture regeneration lives under
+`tools/f8-fixture-gen/`.
+
 ### Protocols, Offers, Completions, Delegations, Subscriptions, Telegram, X Posts, Zealy
 
 See route files in `src/routes/` for full details.
