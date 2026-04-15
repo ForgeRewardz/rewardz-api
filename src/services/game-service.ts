@@ -538,13 +538,54 @@ export function computeRewardAmount(args: {
 }
 
 /**
+ * TS port of the per-player motherlode-share pro-rata from the pre-F3
+ * `process_settle_round` (see
+ * mvp-smart-contracts@f620107:program/src/game_round.rs, the motherlode
+ * distribution block around the settle loop):
+ *
+ *   motherlode_share = is_hit && motherlode_triggered
+ *       ? motherlode_amount * points_deployed / total_hit_points
+ *       : 0
+ *
+ * Post-F3 the on-chain program collapses motherlode rounds into
+ * `refund_mode` (no mint, no per-player share), so in the current program
+ * this function returns 0 in practice. We still port it byte-for-byte for
+ * parity with the reference formula and so analytics / legacy surfaces can
+ * compute a hypothetical share amount from stored event data. Division
+ * truncates to match Rust u64 semantics; a zero denominator returns 0.
+ */
+export function computeMotherlodeShare(args: {
+  isHit: boolean;
+  motherlodeTriggered: boolean;
+  motherlodeAmount: bigint;
+  pointsDeployed: bigint;
+  totalHitPoints: bigint;
+}): bigint {
+  if (!(args.isHit && args.motherlodeTriggered)) return 0n;
+  if (args.totalHitPoints === 0n) return 0n;
+  return (args.motherlodeAmount * args.pointsDeployed) / args.totalHitPoints;
+}
+
+/**
  * Convenience: given the snapshot from a `RoundSettled` event plus a single
- * player's deployment, derive the same (is_hit, reward_amount) pair that
- * `checkpoint_round` will later emit. The API uses this to populate rows
- * ahead of checkpoint events; `CheckpointRecorded` reconciliation overwrites.
+ * player's deployment, derive the same (is_hit, reward_amount,
+ * motherlode_share) triple that `checkpoint_round` (and the legacy
+ * motherlode distribution) would emit. The API uses this to populate rows
+ * ahead of checkpoint events; `CheckpointRecorded` reconciliation
+ * overwrites `is_hit` / `reward_amount` with authoritative on-chain values.
  *
  * `refundMode` short-circuits to zero rewards regardless of points — the
- * on-chain claim path refunds the fee instead.
+ * on-chain claim path refunds the fee instead. Callers that don't yet
+ * track motherlode outcomes can omit the `motherlode*` fields — the
+ * synthesiser treats them as !triggered and returns share = 0.
+ *
+ * NOTE: synthesis is best-effort until F6 lands the authoritative cranker.
+ * Callers must pass the `slot_hash` snapshotted at settle time; the
+ * `RoundSettled` event payload does NOT carry it (see
+ * src/services/game-event-listener.ts — RoundSettled handler). Until the
+ * keeper pipes slot_hash into the API (or the listener adds an RPC
+ * getAccountInfo fallback), rounds where slot_hash is NULL simply skip
+ * synthesis; `CheckpointRecorded` remains the source of truth.
  */
 export function synthesizePlayerOutcome(args: {
   slotHash: Uint8Array;
@@ -556,8 +597,13 @@ export function synthesizePlayerOutcome(args: {
   totalPointsDeployed: bigint;
   tokensMinted: bigint;
   refundMode: boolean;
-}): { isHit: boolean; rewardAmount: bigint } {
-  if (args.refundMode) return { isHit: false, rewardAmount: 0n };
+  motherlodeTriggered?: boolean;
+  motherlodeAmount?: bigint;
+  totalHitPoints?: bigint;
+}): { isHit: boolean; rewardAmount: bigint; motherlodeShare: bigint } {
+  if (args.refundMode) {
+    return { isHit: false, rewardAmount: 0n, motherlodeShare: 0n };
+  }
   const isHit = computePlayerHit({
     slotHash: args.slotHash,
     roundId: args.roundId,
@@ -572,7 +618,14 @@ export function synthesizePlayerOutcome(args: {
     hitRateBps: args.hitRateBps,
     tokensMinted: args.tokensMinted,
   });
-  return { isHit, rewardAmount };
+  const motherlodeShare = computeMotherlodeShare({
+    isHit,
+    motherlodeTriggered: args.motherlodeTriggered ?? false,
+    motherlodeAmount: args.motherlodeAmount ?? 0n,
+    pointsDeployed: args.pointsDeployed,
+    totalHitPoints: args.totalHitPoints ?? 0n,
+  });
+  return { isHit, rewardAmount, motherlodeShare };
 }
 
 export async function recordGameEvent(
@@ -593,6 +646,107 @@ export async function recordGameEvent(
       JSON.stringify(event),
     ],
   );
+}
+
+interface RoundSynthesisRow {
+  slot_hash: Buffer | null;
+  hit_rate_bps: number;
+  tokens_minted: string;
+  motherlode_triggered: boolean;
+  motherlode_amount: string;
+  total_hit_points: string;
+}
+
+interface DeploymentSynthesisRow {
+  wallet_address: string;
+  points_deployed: string | null;
+  settled: boolean;
+}
+
+/**
+ * Best-effort per-player synthesis invoked from the `RoundSettled` branch
+ * of `applyGameEvent`. Reads the round snapshot, iterates every
+ * PlayerDeployment that has not yet been authoritatively settled by a
+ * CheckpointRecorded event, and upserts (is_hit, reward_amount,
+ * motherlode_share) computed by `synthesizePlayerOutcome`.
+ *
+ * No-op when:
+ *   • refund_mode is true (on-chain claim path is the refund flow)
+ *   • game_rounds.slot_hash is NULL (no-one has published the snapshot
+ *     yet — stay silent, let CheckpointRecorded handle it)
+ */
+async function synthesiseRoundOutcomes(event: {
+  roundId: string;
+  settleTimestamp: string;
+  refundMode: boolean;
+  totalPointsDeployed: string;
+}): Promise<void> {
+  if (event.refundMode) return;
+
+  const roundRes = await query<RoundSynthesisRow>(
+    `SELECT slot_hash, hit_rate_bps,
+            tokens_minted::text, motherlode_triggered,
+            motherlode_amount::text, total_hit_points::text
+       FROM game_rounds
+      WHERE round_id = $1
+      LIMIT 1`,
+    [event.roundId],
+  );
+  const round = roundRes.rows[0];
+  if (!round?.slot_hash) return;
+  const slotHash = new Uint8Array(round.slot_hash);
+  if (slotHash.length !== 32) return;
+
+  const playersRes = await query<DeploymentSynthesisRow>(
+    `SELECT wallet_address, points_deployed::text, settled
+       FROM player_deployments
+      WHERE round_id = $1`,
+    [event.roundId],
+  );
+  const totalPoints = BigInt(event.totalPointsDeployed);
+  const tokensMinted = BigInt(round.tokens_minted);
+  const motherlodeAmount = BigInt(round.motherlode_amount);
+  const totalHitPoints = BigInt(round.total_hit_points);
+  const roundIdBig = BigInt(event.roundId);
+  const settleTsBig = BigInt(event.settleTimestamp);
+
+  for (const p of playersRes.rows) {
+    // Skip players already settled by CheckpointRecorded — that branch is
+    // authoritative. Synthesis only fills rows ahead of the cranker.
+    if (p.settled) continue;
+    if (!p.points_deployed) continue;
+    const outcome = synthesizePlayerOutcome({
+      slotHash,
+      roundId: roundIdBig,
+      settleTimestamp: settleTsBig,
+      walletAddress: p.wallet_address,
+      hitRateBps: round.hit_rate_bps,
+      pointsDeployed: BigInt(p.points_deployed),
+      totalPointsDeployed: totalPoints,
+      tokensMinted,
+      refundMode: false,
+      motherlodeTriggered: round.motherlode_triggered,
+      motherlodeAmount,
+      totalHitPoints,
+    });
+    // Best-effort: only touch rows still settled=false so we never stomp
+    // on a CheckpointRecorded write that raced ahead.
+    await query(
+      `UPDATE player_deployments
+          SET is_hit = $3,
+              reward_amount = $4,
+              motherlode_share = $5,
+              updated_at = NOW()
+        WHERE round_id = $1 AND wallet_address = $2 AND settled = false`,
+      [
+        event.roundId,
+        p.wallet_address,
+        outcome.isHit,
+        outcome.rewardAmount.toString(),
+        outcome.motherlodeShare.toString(),
+      ],
+    );
+  }
 }
 
 export async function applyGameEvent(
@@ -678,13 +832,41 @@ export async function applyGameEvent(
           signature ?? null,
         ],
       );
+      // Synthesise per-player (is_hit, reward_amount, motherlode_share)
+      // off-chain so the /v1/game/round/:id/status endpoint can surface
+      // the outcome before CheckpointRecorded arrives. Reconciled later
+      // when CheckpointRecorded overwrites is_hit/reward_amount with the
+      // authoritative on-chain values.
+      //
+      // BEST-EFFORT: `slot_hash` is NOT carried in the RoundSettled event
+      // payload. The keeper / backfill path is expected to persist it on
+      // the game_rounds row out-of-band (see game_rounds.slot_hash —
+      // migration 038). Rounds without a stored slot_hash are skipped
+      // silently; CheckpointRecorded remains the source of truth in that
+      // case. Once F6 lands the cranker we can drop this best-effort
+      // branch entirely.
+      await synthesiseRoundOutcomes(event);
       break;
     }
 
-    case "CheckpointRecorded":
+    case "CheckpointRecorded": {
       // Authoritative per-player outcome. Overwrites any row synthesized
       // off-chain before the checkpoint instruction landed.
-      await query(
+      //
+      // Dedup protocol (code-review Fix C): the RPC logsSubscribe stream
+      // can re-deliver a CheckpointRecorded log after a reconnect. The
+      // per-player `player_deployments` row is idempotent under
+      // ON CONFLICT, but the sibling `game_rounds` counters
+      // (`hit_count`, `tokens_minted`) are NOT — incrementing them
+      // unconditionally would double-count on every replay. Gate the
+      // counter update on the upsert being a first-time settle: the
+      // ON CONFLICT update only fires when the existing row has
+      // `settled = false`, and RETURNING bubbles a row up to the CTE
+      // only in that case. A replayed event finds settled=true, the
+      // DO UPDATE is skipped, RETURNING is empty, and the counter stays
+      // put. `xmax = 0` distinguishes an insert from an update so we can
+      // surface the first-settle signal cleanly to the caller/tests.
+      const upsertRes = await query<{ wallet_address: string }>(
         `INSERT INTO player_deployments (
            round_id, wallet_address, is_hit, reward_amount, settled,
            source_signature
@@ -696,7 +878,9 @@ export async function applyGameEvent(
            reward_amount = EXCLUDED.reward_amount,
            settled = true,
            source_signature = COALESCE(EXCLUDED.source_signature, player_deployments.source_signature),
-           updated_at = NOW()`,
+           updated_at = NOW()
+         WHERE player_deployments.settled = false
+         RETURNING wallet_address`,
         [
           event.roundId,
           event.walletAddress,
@@ -706,8 +890,9 @@ export async function applyGameEvent(
         ],
       );
       // Roll hit counters on the round for observability parity with
-      // process_checkpoint_round's on-chain write.
-      if (event.isHit) {
+      // process_checkpoint_round's on-chain write — only on the first
+      // successful settle. Empty RETURNING ⇒ replay, skip.
+      if (upsertRes.rowCount && upsertRes.rowCount > 0 && event.isHit) {
         await query(
           `UPDATE game_rounds
               SET hit_count = hit_count + 1,
@@ -718,6 +903,7 @@ export async function applyGameEvent(
         );
       }
       break;
+    }
 
     case "MotherlodeTriggered":
       // Post-F3 payload is round_id + motherlode_amount only; refund_mode

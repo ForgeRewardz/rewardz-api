@@ -73,6 +73,30 @@ fn reward_amount(
     checked_pro_rata(tokens_minted, points_deployed, expected)
 }
 
+// Mirrors the pre-F3 per-player motherlode distribution formula that lived
+// inside `process_settle_round` (see f620107:program/src/game_round.rs, the
+// `motherlode_share` block around the settle loop). The post-F3 program
+// collapses motherlode rounds into refund_mode and does NOT mint per-player
+// shares on-chain — but the off-chain synthesis still needs the formula so
+// the API can surface a hypothetical share amount for analytics / rounds
+// that reuse the old layout.
+//
+//   motherlode_share = is_hit && motherlode_triggered
+//       ? motherlode_amount * points_deployed / total_hit_points
+//       : 0
+fn motherlode_share(
+    is_hit: bool,
+    motherlode_triggered: bool,
+    motherlode_amount: u64,
+    points_deployed: u64,
+    total_hit_points: u64,
+) -> u64 {
+    if !(is_hit && motherlode_triggered) {
+        return 0;
+    }
+    checked_pro_rata(motherlode_amount, points_deployed, total_hit_points)
+}
+
 // Five stable test wallets and two slot hashes. The Rust process_settle_round
 // writes slot_hash from the SlotHashes sysvar so any 32-byte sequence is a
 // valid off-chain fixture — we pick two distinct hashes for coverage.
@@ -194,6 +218,31 @@ fn main() {
         print!(
             "    {{\"isHit\": {}, \"pointsDeployed\": \"{}\", \"totalPointsDeployed\": \"{}\", \"hitRateBps\": {}, \"tokensMinted\": \"{}\", \"expectedReward\": \"{}\"}}",
             is_hit, pd, total, bps, mint, r
+        );
+    }
+    println!("\n  ],");
+
+    // motherlode_share cases. Cover: miss → 0; hit but !triggered → 0;
+    // hit + triggered even split (two players equal points); hit +
+    // triggered uneven (100/400); huge motherlode pool with many hits.
+    println!("  \"motherlode_share\": [");
+    let scases: &[(bool, bool, u64, u64, u64)] = &[
+        (false, true, 1000, 100, 400),                 // miss → 0
+        (true, false, 1000, 100, 400),                 // !triggered → 0
+        (true, true, 1000, 100, 400),                  // 1000 * 100 / 400 = 250
+        (true, true, 1000, 300, 400),                  // 1000 * 300 / 400 = 750
+        (true, true, 500, 250, 500),                   // 500 * 250 / 500 = 250
+        (true, true, 0, 100, 400),                     // empty pool → 0
+        (true, true, 1_000_000_000, 1, 1_000_000_000), // big / 1 → 1
+        (true, true, 1000, 100, 0),                    // div-by-0 guard → 0
+    ];
+    let mut first = true;
+    for (is_hit, triggered, amount, pd, total_hit) in scases.iter() {
+        let s = motherlode_share(*is_hit, *triggered, *amount, *pd, *total_hit);
+        if !first { println!(","); } else { first = false; }
+        print!(
+            "    {{\"isHit\": {}, \"motherlodeTriggered\": {}, \"motherlodeAmount\": \"{}\", \"pointsDeployed\": \"{}\", \"totalHitPoints\": \"{}\", \"expectedShare\": \"{}\"}}",
+            is_hit, triggered, amount, pd, total_hit, s
         );
     }
     println!("\n  ]");

@@ -161,13 +161,19 @@ When supplied the response includes the caller's `player` deployment row —
 
 Post-F3 semantics (three-step refactor): `RoundSettled` carries the
 `settle_timestamp` / `expires_at` / `refund_mode` / `total_points_deployed`
-snapshot only. Per-player `is_hit` / `reward_amount` is written by
-`CheckpointRecorded` as crankers (or the player themselves) run
-`checkpoint_round`. The `game-service.ts` TS port of
-`compute_player_hit` / reward-amount lets the API synthesize expected
-outcomes before the checkpoint instruction lands; the authoritative value
-overwrites when the event arrives. Fixture regeneration lives under
-`tools/f8-fixture-gen/`.
+snapshot only. Per-player `is_hit` / `reward_amount` / `motherlode_share`
+is written by `CheckpointRecorded` as crankers (or the player themselves)
+run `checkpoint_round`. The `game-service.ts` TS port of
+`compute_player_hit` / `compute_motherlode_share` / reward-amount lets the
+API synthesize expected outcomes before the checkpoint instruction lands
+— when `RoundSettled` fires we iterate every `PlayerDeployment` whose
+`settled = false` and fill in the synthesized triple (best-effort, gated
+on a stored `slot_hash`; the keeper is expected to backfill this row
+out-of-band until the F6 cranker ships). `CheckpointRecorded` then
+overwrites with the authoritative on-chain values and, thanks to an
+`ON CONFLICT ... WHERE settled = false` gate, will not double-count the
+`game_rounds.hit_count` / `tokens_minted` rollups on RPC reconnect
+replays. Fixture regeneration lives under `tools/f8-fixture-gen/`.
 
 ### Protocols, Offers, Completions, Delegations, Subscriptions, Telegram, X Posts, Zealy
 

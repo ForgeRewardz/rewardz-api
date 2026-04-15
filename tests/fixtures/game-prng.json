@@ -56,5 +56,15 @@
     {"isHit": true, "pointsDeployed": "0", "totalPointsDeployed": "0", "hitRateBps": 5000, "tokensMinted": "1000", "expectedReward": "0"},
     {"isHit": true, "pointsDeployed": "1000000000", "totalPointsDeployed": "10000000000", "hitRateBps": 2500, "tokensMinted": "1000000000", "expectedReward": "400000000"},
     {"isHit": true, "pointsDeployed": "250", "totalPointsDeployed": "1000", "hitRateBps": 10000, "tokensMinted": "1000", "expectedReward": "250"}
+  ],
+  "motherlode_share": [
+    {"isHit": false, "motherlodeTriggered": true, "motherlodeAmount": "1000", "pointsDeployed": "100", "totalHitPoints": "400", "expectedShare": "0"},
+    {"isHit": true, "motherlodeTriggered": false, "motherlodeAmount": "1000", "pointsDeployed": "100", "totalHitPoints": "400", "expectedShare": "0"},
+    {"isHit": true, "motherlodeTriggered": true, "motherlodeAmount": "1000", "pointsDeployed": "100", "totalHitPoints": "400", "expectedShare": "250"},
+    {"isHit": true, "motherlodeTriggered": true, "motherlodeAmount": "1000", "pointsDeployed": "300", "totalHitPoints": "400", "expectedShare": "750"},
+    {"isHit": true, "motherlodeTriggered": true, "motherlodeAmount": "500", "pointsDeployed": "250", "totalHitPoints": "500", "expectedShare": "250"},
+    {"isHit": true, "motherlodeTriggered": true, "motherlodeAmount": "0", "pointsDeployed": "100", "totalHitPoints": "400", "expectedShare": "0"},
+    {"isHit": true, "motherlodeTriggered": true, "motherlodeAmount": "1000000000", "pointsDeployed": "1", "totalHitPoints": "1000000000", "expectedShare": "1"},
+    {"isHit": true, "motherlodeTriggered": true, "motherlodeAmount": "1000", "pointsDeployed": "100", "totalHitPoints": "0", "expectedShare": "0"}
   ]
 }

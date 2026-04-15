@@ -27,6 +27,7 @@ type Keccak256Module = typeof import("../../src/services/keccak256.js");
 
 let computePlayerHit: GameServiceModule["computePlayerHit"];
 let computeMotherlodeHit: GameServiceModule["computeMotherlodeHit"];
+let computeMotherlodeShare: GameServiceModule["computeMotherlodeShare"];
 let computeRewardAmount: GameServiceModule["computeRewardAmount"];
 let synthesizePlayerOutcome: GameServiceModule["synthesizePlayerOutcome"];
 let parseGameProgramLog: GameServiceModule["parseGameProgramLog"];
@@ -62,6 +63,15 @@ interface RewardCase {
   expectedReward: string;
 }
 
+interface MotherlodeShareCase {
+  isHit: boolean;
+  motherlodeTriggered: boolean;
+  motherlodeAmount: string;
+  pointsDeployed: string;
+  totalHitPoints: string;
+  expectedShare: string;
+}
+
 interface Fixture {
   generator: string;
   keccak_variant: string;
@@ -70,6 +80,7 @@ interface Fixture {
   player_hit: PlayerHitCase[];
   motherlode_hit: MotherlodeCase[];
   reward_amount: RewardCase[];
+  motherlode_share: MotherlodeShareCase[];
 }
 
 const fixture = JSON.parse(readFileSync(fixturePath, "utf8")) as Fixture;
@@ -78,6 +89,7 @@ beforeAll(async () => {
   const gameService = await import("../../src/services/game-service.js");
   computePlayerHit = gameService.computePlayerHit;
   computeMotherlodeHit = gameService.computeMotherlodeHit;
+  computeMotherlodeShare = gameService.computeMotherlodeShare;
   computeRewardAmount = gameService.computeRewardAmount;
   synthesizePlayerOutcome = gameService.synthesizePlayerOutcome;
   parseGameProgramLog = gameService.parseGameProgramLog;
@@ -172,6 +184,25 @@ describe("computeRewardAmount (pro-rata + clamp)", () => {
   });
 });
 
+describe("computeMotherlodeShare (pre-F3 per-player pro-rata)", () => {
+  it("matches every Rust-emitted share case", () => {
+    expect(fixture.motherlode_share.length).toBeGreaterThanOrEqual(3);
+    for (const c of fixture.motherlode_share) {
+      const got = computeMotherlodeShare({
+        isHit: c.isHit,
+        motherlodeTriggered: c.motherlodeTriggered,
+        motherlodeAmount: BigInt(c.motherlodeAmount),
+        pointsDeployed: BigInt(c.pointsDeployed),
+        totalHitPoints: BigInt(c.totalHitPoints),
+      });
+      expect(
+        got.toString(),
+        `hit=${c.isHit} trig=${c.motherlodeTriggered} amt=${c.motherlodeAmount} pts=${c.pointsDeployed}/${c.totalHitPoints}`,
+      ).toBe(c.expectedShare);
+    }
+  });
+});
+
 describe("synthesizePlayerOutcome", () => {
   const aCase = fixture.player_hit.find((c) => c.expectedIsHit === true)!;
   const slot = hexToBytes(aCase.slotHashHex);
@@ -188,10 +219,14 @@ describe("synthesizePlayerOutcome", () => {
       tokensMinted: 1000n,
       refundMode: true,
     });
-    expect(result).toEqual({ isHit: false, rewardAmount: 0n });
+    expect(result).toEqual({
+      isHit: false,
+      rewardAmount: 0n,
+      motherlodeShare: 0n,
+    });
   });
 
-  it("returns both fields for a hit case in non-refund mode", () => {
+  it("returns all three fields for a hit case in non-refund mode", () => {
     const result = synthesizePlayerOutcome({
       slotHash: slot,
       roundId: BigInt(aCase.roundId),
@@ -210,6 +245,32 @@ describe("synthesizePlayerOutcome", () => {
       expect(result.rewardAmount).toBe(1000n);
     } else {
       expect(result.rewardAmount).toBeGreaterThanOrEqual(0n);
+    }
+    // Without motherlode* fields, share defaults to 0.
+    expect(result.motherlodeShare).toBe(0n);
+  });
+
+  it("propagates motherlode_share when motherlode_triggered=true", () => {
+    const result = synthesizePlayerOutcome({
+      slotHash: slot,
+      roundId: BigInt(aCase.roundId),
+      settleTimestamp: BigInt(aCase.settleTimestamp),
+      walletAddress: aCase.walletAddress,
+      hitRateBps: aCase.hitRateBps,
+      pointsDeployed: 100n,
+      totalPointsDeployed: 1000n,
+      tokensMinted: 1000n,
+      refundMode: false,
+      motherlodeTriggered: true,
+      motherlodeAmount: 1000n,
+      totalHitPoints: 400n,
+    });
+    // is_hit propagated from compute_player_hit for this wallet/round.
+    if (result.isHit) {
+      // 1000 * 100 / 400 = 250
+      expect(result.motherlodeShare).toBe(250n);
+    } else {
+      expect(result.motherlodeShare).toBe(0n);
     }
   });
 });
