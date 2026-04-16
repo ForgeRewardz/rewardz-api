@@ -27,6 +27,7 @@ import { idlUploadRoutes } from "./routes/idl-upload.js";
 import { blinksPublishRoutes } from "./routes/blinks-publish.js";
 import { blinksRuntimeRoutes } from "./routes/blinks-runtime.js";
 import { blinksUserStakeRoutes } from "./routes/blinks-user-stake.js";
+import { blinksCreateRentalRoutes } from "./routes/blinks-create-rental.js";
 import { actionsJsonRoutes } from "./routes/actions-json.js";
 import { healthRoutes } from "./routes/health.js";
 
@@ -120,6 +121,11 @@ export function buildApp() {
   app.register(blinksPublishRoutes, { prefix: "/v1" });
   app.register(blinksUserStakeRoutes, { prefix: "/v1" });
   app.register(blinksRuntimeRoutes, { prefix: "/v1" });
+  // Hand-curated user-facing `create_rental` Blink (plan task 42).
+  // Lives alongside the generic manifest-driven runtime because its
+  // parameter labels (duration / maxFee) are curated rather than
+  // auto-generated from the IDL.
+  app.register(blinksCreateRentalRoutes, { prefix: "/v1" });
   app.register(actionsJsonRoutes);
 
   // Health check at root (no prefix)
