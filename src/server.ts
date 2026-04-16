@@ -26,6 +26,7 @@ import { discoveryRoutes } from "./routes/discovery.js";
 import { idlUploadRoutes } from "./routes/idl-upload.js";
 import { blinksPublishRoutes } from "./routes/blinks-publish.js";
 import { blinksRuntimeRoutes } from "./routes/blinks-runtime.js";
+import { blinksUserStakeRoutes } from "./routes/blinks-user-stake.js";
 import { actionsJsonRoutes } from "./routes/actions-json.js";
 import { healthRoutes } from "./routes/health.js";
 
@@ -117,6 +118,7 @@ export function buildApp() {
   // corsActionsPlugin onRequest hook registered above.
   app.register(idlUploadRoutes, { prefix: "/v1" });
   app.register(blinksPublishRoutes, { prefix: "/v1" });
+  app.register(blinksUserStakeRoutes, { prefix: "/v1" });
   app.register(blinksRuntimeRoutes, { prefix: "/v1" });
   app.register(actionsJsonRoutes);
 
