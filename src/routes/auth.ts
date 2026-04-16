@@ -14,17 +14,11 @@ import {
   bindJtiToSession,
   revokeJti,
 } from "../services/auth-sessions.js";
+import { BASE58_PUBKEY } from "../types/solana.js";
 
 /* -------------------------------------------------------------------------- */
 /*  Constants                                                                 */
 /* -------------------------------------------------------------------------- */
-
-/**
- * Matches a Solana base58 pubkey (32 bytes → 32-44 base58 chars). Mirrors
- * the regex used in `src/config.ts` for ADMIN_WALLETS so console payloads
- * and env config reject the same set of malformed pubkeys.
- */
-const BASE58_PUBKEY = /^[1-9A-HJ-NP-Za-km-z]{32,44}$/;
 
 /**
  * Signed-message format version prefix. The `v1:` prefix is mandatory

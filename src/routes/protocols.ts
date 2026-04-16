@@ -5,7 +5,10 @@ import {
   requireBearerAuth,
   requireProtocolOwner,
 } from "../middleware/auth.js";
-import { query } from "../db/client.js";
+import { query, pool } from "../db/client.js";
+import { league } from "../config.js";
+import { BASE58_PUBKEY } from "../types/solana.js";
+import { capacityBaseline as capacityBaselineOf } from "../services/capacity.js";
 
 /* -------------------------------------------------------------------------- */
 /*  Request types                                                             */
@@ -27,6 +30,11 @@ interface PatchBody {
   description?: string;
   blink_base_url?: string;
   supported_actions?: string[];
+}
+
+interface LeagueJoinBody {
+  founder_wallets?: string[];
+  team_wallets?: string[];
 }
 
 interface CreateQuestBody {
@@ -489,4 +497,429 @@ export async function protocolRoutes(app: FastifyInstance): Promise<void> {
       }
     },
   );
+
+  /* ------ GET /protocols/:id/league/status ------
+   *
+   * Plan task 19. Consolidated league-state readout for the
+   * protocol-console dashboard and SDK. Returns visibility,
+   * remaining issuance capacity, quality score, open abuse flags,
+   * sum of unpublished Rewardz earnings, registered wallet weights,
+   * and the most recent protocol_events (for banners). Protected by
+   * `requireBearerAuth + requireProtocolOwner` — a protocol's league
+   * status is sensitive (capacity baseline, abuse flags) so only the
+   * owner sees it. Discovery surfaces go through /intents/resolve +
+   * /discovery/featured which already filter on visibility.
+   */
+  app.get<{ Params: ProtocolParams }>(
+    "/protocols/:id/league/status",
+    { preHandler: [requireBearerAuth, requireProtocolOwner] },
+    async (request, reply) => {
+      const { id } = request.params;
+
+      try {
+        const protoRes = await query<{
+          id: string;
+          admin_wallet: string;
+          visibility: string | null;
+          quality_score: string | null;
+          remaining_capacity: string | null;
+          capacity_window_start: Date | null;
+          referral_code: string | null;
+          founder_wallets: string[];
+          team_wallets: string[];
+          active_stake: string | null;
+        }>(
+          `SELECT id, admin_wallet, visibility,
+                  quality_score::text AS quality_score,
+                  remaining_capacity::text AS remaining_capacity,
+                  capacity_window_start, referral_code,
+                  founder_wallets, team_wallets,
+                  active_stake::text AS active_stake
+             FROM protocols WHERE id = $1 LIMIT 1`,
+          [id],
+        );
+
+        if (protoRes.rowCount === 0) {
+          return reply
+            .status(404)
+            .send({ error: "Not Found", message: "Protocol not found" });
+        }
+        const proto = protoRes.rows[0];
+
+        // Open abuse flags (resolved_at IS NULL), grouped by kind/severity.
+        const flagsRes = await query<{
+          kind: string;
+          severity: string;
+          created_at: Date;
+        }>(
+          `SELECT kind, severity, created_at
+             FROM abuse_flags
+            WHERE protocol_id = $1
+              AND resolved_at IS NULL
+            ORDER BY created_at DESC`,
+          [id],
+        );
+
+        // Sum unpublished Rewardz earnings (what a claim_rewardz would
+        // be able to pull once the next root epoch publishes).
+        const pendingRes = await query<{ pending: string }>(
+          `SELECT COALESCE(SUM(amount), 0)::text AS pending
+             FROM rewardz_earnings
+            WHERE protocol_id = $1
+              AND included_in_root_epoch IS NULL`,
+          [id],
+        );
+
+        const weightsRes = await query<{
+          wallet: string;
+          role: string;
+          weight: string;
+        }>(
+          `SELECT wallet, role, weight::text AS weight
+             FROM wallet_weights
+            WHERE protocol_id = $1
+            ORDER BY role, wallet`,
+          [id],
+        );
+
+        const eventsRes = await query<{
+          id: string;
+          kind: string;
+          level: string;
+          payload: unknown;
+          created_at: Date;
+        }>(
+          `SELECT id::text AS id, kind, level, payload, created_at
+             FROM protocol_events
+            WHERE protocol_id = $1
+            ORDER BY created_at DESC
+            LIMIT 10`,
+          [id],
+        );
+
+        // Capacity baseline (task 16a): derived via the shared
+        // `capacityBaseline()` helper so the console's percentage
+        // math stays locked to the same rule the server uses when
+        // emitting threshold-crossing events. See
+        // api/src/services/capacity.ts.
+        const activeStake =
+          proto.active_stake == null ? null : BigInt(proto.active_stake);
+        const baseline = capacityBaselineOf(activeStake);
+
+        // camelCase keys mirror sibling dashboard handlers in this file
+        // (/overview at :290, /performance at :414). BigInt-like columns
+        // (remainingCapacity, pendingRewardz, capacityBaseline) are left
+        // as strings to avoid JS Number precision loss; qualityScore is
+        // bounded 0..1 so Number() is safe.
+        return reply.status(200).send({
+          protocolId: proto.id,
+          adminWallet: proto.admin_wallet,
+          visibility: proto.visibility ?? "active",
+          qualityScore:
+            proto.quality_score == null ? null : Number(proto.quality_score),
+          remainingCapacity: proto.remaining_capacity,
+          capacityWindowStart:
+            proto.capacity_window_start?.toISOString() ?? null,
+          capacityBaseline: baseline.toString(),
+          activeStake: proto.active_stake,
+          referralCode: proto.referral_code,
+          founderWallets: proto.founder_wallets,
+          teamWallets: proto.team_wallets,
+          pendingRewardz: pendingRes.rows[0].pending,
+          openAbuseFlags: flagsRes.rows.map((r) => ({
+            kind: r.kind,
+            severity: r.severity,
+            createdAt: r.created_at.toISOString(),
+          })),
+          walletWeights: weightsRes.rows.map((r) => ({
+            wallet: r.wallet,
+            role: r.role,
+            weight: Number(r.weight),
+          })),
+          recentEvents: eventsRes.rows.map((r) => ({
+            id: r.id,
+            kind: r.kind,
+            level: r.level,
+            payload: r.payload,
+            createdAt: r.created_at.toISOString(),
+          })),
+        });
+      } catch (err) {
+        request.log.error(err, "Failed to fetch league status");
+        return reply.status(500).send({
+          error: "Internal Server Error",
+          message: "Failed to fetch league status",
+        });
+      }
+    },
+  );
+
+  /* ------ POST /protocols/:id/league/join ------
+   *
+   * Plan task 20. Joins a protocol to the Colosseum Rewardz League:
+   *   1. Generates a unique referral code (used by /referrals/attribute
+   *      in task 21) and persists declared founder/team wallets.
+   *   2. Inserts a `rewardz_earnings` row for the starter grant
+   *      (reason='starter_grant', milestone_id=NULL). The partial
+   *      UNIQUE index from migration 045
+   *      (`rewardz_earnings(protocol_id, reason) WHERE milestone_id IS NULL`)
+   *      makes this insert idempotent at the DB layer — re-joining
+   *      the same protocol cannot double-pay.
+   *   3. Seeds `wallet_weights` rows for declared founder/team wallets
+   *      using the per-role weights from `league-config.md`. The
+   *      admin_wallet is added as a founder automatically so the
+   *      milestone-processor's anti-abuse math always has a weight
+   *      row for the protocol's primary operator.
+   *   4. Emits a `protocol_events` row (`kind='league_joined'`,
+   *      level='info') so the console can surface the action in its
+   *      activity feed.
+   *
+   * Capacity is deliberately NOT initialised here. Per league-config.md,
+   * remaining_capacity is unlocked by staking the starter grant
+   * (task 16a). Join writes the ledger row; the stake-watcher debits
+   * from the ledger once the on-chain stake is observed.
+   *
+   * Idempotency: calling league/join on a protocol that has already
+   * joined (non-null referral_code AND a starter_grant earnings row)
+   * returns 200 with the existing state rather than 409 — joining is
+   * a one-shot lifecycle event, and a retry after a flaky response
+   * should not surface as an error. All four write paths use
+   * conflict-safe inserts so a partial previous attempt is completed
+   * rather than duplicated.
+   *
+   * Protected by `requireBearerAuth + requireProtocolOwner`.
+   */
+  app.post<{ Params: ProtocolParams; Body: LeagueJoinBody }>(
+    "/protocols/:id/league/join",
+    { preHandler: [requireBearerAuth, requireProtocolOwner] },
+    async (request, reply) => {
+      const { id } = request.params;
+      const body = request.body ?? {};
+
+      // Guard against non-array bodies BEFORE calling .filter. A caller
+      // who sends `{"founder_wallets": "abc"}` (string, not array) would
+      // otherwise hit `.filter is not a function`, fall through to the
+      // generic catch, and surface as a 500 — which masks a plain
+      // client-side error as a server fault.
+      if (
+        body.founder_wallets !== undefined &&
+        !Array.isArray(body.founder_wallets)
+      ) {
+        return reply.status(400).send({
+          error: "Bad Request",
+          message: "founder_wallets must be an array",
+        });
+      }
+      if (
+        body.team_wallets !== undefined &&
+        !Array.isArray(body.team_wallets)
+      ) {
+        return reply.status(400).send({
+          error: "Bad Request",
+          message: "team_wallets must be an array",
+        });
+      }
+
+      // Validate declared wallets are plausible base58 pubkeys. Uses
+      // the shared BASE58_PUBKEY regex so config/auth/protocols cannot
+      // drift on what "valid wallet" means.
+      const founderWallets = (body.founder_wallets ?? []).filter(
+        (w) => typeof w === "string" && BASE58_PUBKEY.test(w),
+      );
+      const teamWallets = (body.team_wallets ?? []).filter(
+        (w) => typeof w === "string" && BASE58_PUBKEY.test(w),
+      );
+      if (
+        (body.founder_wallets?.length ?? 0) !== founderWallets.length ||
+        (body.team_wallets?.length ?? 0) !== teamWallets.length
+      ) {
+        return reply.status(400).send({
+          error: "Bad Request",
+          message:
+            "founder_wallets and team_wallets must be arrays of base58 Solana pubkeys",
+        });
+      }
+
+      // Initial SELECT runs outside the transaction — it's pure read,
+      // doesn't need the BEGIN/COMMIT envelope, and a 404 should not
+      // hold a pooled client hostage through a tx round-trip.
+      const protoRes = await query<{
+        admin_wallet: string;
+        referral_code: string | null;
+      }>(
+        `SELECT admin_wallet, referral_code FROM protocols
+          WHERE id = $1 LIMIT 1`,
+        [id],
+      );
+      if (protoRes.rowCount === 0) {
+        return reply
+          .status(404)
+          .send({ error: "Not Found", message: "Protocol not found" });
+      }
+      const { admin_wallet: adminWallet, referral_code: existingReferralCode } =
+        protoRes.rows[0];
+
+      // Admin is always a founder — merge into declared list so the
+      // caller does not have to remember to include their own
+      // wallet. De-dupe via Set.
+      const foundersFinal = Array.from(
+        new Set([adminWallet, ...founderWallets]),
+      );
+      const teamFinal = Array.from(new Set(teamWallets)).filter(
+        (w) => !foundersFinal.includes(w),
+      );
+
+      const client = await pool.connect();
+      try {
+        await client.query("BEGIN");
+
+        // Generate a unique referral_code if the protocol does not
+        // already have one. Bounded retry — the keyspace (31^6 ≈ 887M)
+        // combined with a partial UNIQUE index on non-null codes means
+        // collisions are pathological; 3 attempts is plenty. If the
+        // UPDATE's `referral_code IS NULL` guard loses a race, the
+        // losing caller just re-reads on its next outer request —
+        // there is no benefit to re-reading here.
+        let referralCode = existingReferralCode;
+        if (!referralCode) {
+          for (let attempt = 0; attempt < 3; attempt++) {
+            const candidate = generateReferralCode();
+            const upd = await client.query<{ referral_code: string }>(
+              `UPDATE protocols
+                  SET referral_code = $2,
+                      founder_wallets = $3,
+                      team_wallets = $4,
+                      updated_at = NOW()
+                WHERE id = $1
+                  AND referral_code IS NULL
+                RETURNING referral_code`,
+              [id, candidate, foundersFinal, teamFinal],
+            );
+            if (upd.rowCount && upd.rowCount > 0) {
+              referralCode = upd.rows[0].referral_code;
+              break;
+            }
+          }
+          if (!referralCode) {
+            await client.query("ROLLBACK");
+            return reply.status(500).send({
+              error: "Internal Server Error",
+              message: "Failed to allocate referral code",
+            });
+          }
+        } else {
+          // Protocol already has a code — update declared wallet
+          // arrays idempotently so callers can amend a join.
+          await client.query(
+            `UPDATE protocols
+                SET founder_wallets = $2,
+                    team_wallets = $3,
+                    updated_at = NOW()
+              WHERE id = $1`,
+            [id, foundersFinal, teamFinal],
+          );
+        }
+
+        // Starter-grant Rewardz earnings row. Migration 045's partial
+        // UNIQUE on (protocol_id, reason) WHERE milestone_id IS NULL
+        // makes this insert at-most-once per protocol.
+        const starter = league.starter_grant_rewardz;
+        const starterInsert = await client.query<{ id: string }>(
+          `INSERT INTO rewardz_earnings
+              (protocol_id, protocol_authority, amount, reason, milestone_id)
+           VALUES ($1, $2, $3::bigint, 'starter_grant', NULL)
+           ON CONFLICT (protocol_id, reason) WHERE milestone_id IS NULL
+           DO NOTHING
+           RETURNING id::text AS id`,
+          [id, adminWallet, starter],
+        );
+        const starterGrantIssued = (starterInsert.rowCount ?? 0) > 0;
+
+        // Wallet weights — founder=0.25, team=0.5. External weights are
+        // applied by milestone-processor at award time, not seeded here.
+        // Use ON CONFLICT DO UPDATE so re-join with revised founder/team
+        // lists moves a wallet between roles instead of failing.
+        // Batched via unnest() so a protocol with dozens of team
+        // wallets does one round-trip instead of dozens.
+        const weightWallets = [...foundersFinal, ...teamFinal];
+        const weightRoles = [
+          ...foundersFinal.map(() => "founder"),
+          ...teamFinal.map(() => "team"),
+        ];
+        const weightValues = [
+          ...foundersFinal.map(() => league.wallet_weights.founder),
+          ...teamFinal.map(() => league.wallet_weights.team),
+        ];
+        if (weightWallets.length > 0) {
+          await client.query(
+            `INSERT INTO wallet_weights (protocol_id, wallet, role, weight)
+             SELECT $1, w.wallet, w.role, w.weight
+               FROM unnest($2::text[], $3::text[], $4::numeric[])
+                    AS w(wallet, role, weight)
+             ON CONFLICT (protocol_id, wallet)
+             DO UPDATE SET role = EXCLUDED.role, weight = EXCLUDED.weight`,
+            [id, weightWallets, weightRoles, weightValues],
+          );
+        }
+
+        await client.query(
+          `INSERT INTO protocol_events (protocol_id, kind, level, payload)
+           VALUES ($1, 'league_joined', 'info', $2::jsonb)`,
+          [
+            id,
+            JSON.stringify({
+              starter_grant_rewardz: starter,
+              starter_grant_issued: starterGrantIssued,
+              referral_code: referralCode,
+              founder_count: foundersFinal.length,
+              team_count: teamFinal.length,
+            }),
+          ],
+        );
+
+        await client.query("COMMIT");
+
+        // camelCase keys mirror sibling dashboard handlers in this file
+        // (/overview, /performance, /league/status).
+        return reply.status(200).send({
+          protocolId: id,
+          referralCode: referralCode,
+          starterGrantRewardz: starter,
+          starterGrantIssued: starterGrantIssued,
+          founderWallets: foundersFinal,
+          teamWallets: teamFinal,
+          walletWeightsCount: weightWallets.length,
+        });
+      } catch (err) {
+        await client
+          .query("ROLLBACK")
+          .catch((rollbackErr) =>
+            request.log.warn(rollbackErr, "Rollback failed during league/join"),
+          );
+        request.log.error(err, "Failed to join league");
+        return reply.status(500).send({
+          error: "Internal Server Error",
+          message: "Failed to join league",
+        });
+      } finally {
+        client.release();
+      }
+    },
+  );
+}
+
+/**
+ * Generate a short, human-friendly referral code. 6 chars from a
+ * crockford-ish base32 alphabet (no 0/O/1/I/L to reduce typos). Crypto
+ * RNG so codes are not predictable — otherwise an attacker could
+ * pre-compute codes and front-run referral attribution.
+ */
+function generateReferralCode(): string {
+  const alphabet = "23456789ABCDEFGHJKMNPQRSTUVWXYZ";
+  const bytes = crypto.randomBytes(6);
+  let out = "";
+  for (let i = 0; i < 6; i++) {
+    out += alphabet[bytes[i] % alphabet.length];
+  }
+  return out;
 }

@@ -1,13 +1,12 @@
 import "dotenv/config";
 import { z } from "zod";
-
-/**
- * Matches a Solana base58 pubkey (32 bytes → 43-44 base58 chars).
- * Allows only the base58 alphabet (no 0, O, I, l). This is a format
- * check, not an on-curve check — strict enough to reject obvious
- * typos ("hello") while keeping the config layer RPC-free.
- */
-const BASE58_PUBKEY = /^[1-9A-HJ-NP-Za-km-z]{32,44}$/;
+import {
+  DEVNET,
+  MAINNET,
+  type LeagueConfig,
+  type Network,
+} from "@rewardz/types";
+import { BASE58_PUBKEY } from "./types/solana.js";
 
 const envSchema = z.object({
   PORT: z.coerce.number().default(3001),
@@ -15,6 +14,9 @@ const envSchema = z.object({
     .string()
     .default("postgres://postgres:postgres@127.0.0.1:5432/rewardz"),
   SOLANA_RPC_URL: z.string().default("https://api.devnet.solana.com"),
+  // Colosseum Rewardz League preset selector. Unknown values fail fast on boot
+  // via zod — there is no silent fall-through (per league-config.md).
+  SOLANA_NETWORK: z.enum(["devnet", "mainnet"]).default("devnet"),
   GEMINI_API_KEY: z.string().optional(), // Optional: rules-based fallback when unavailable
   TWITTER_BEARER_TOKEN: z.string().optional(), // Optional: tweet verification is stubbed
   ZEALY_DEFAULT_SECRET: z.string().optional(),
@@ -22,6 +24,12 @@ const envSchema = z.object({
   JWT_SECRET: z.string().min(1, "JWT_SECRET is required"),
   INTERNAL_API_KEY: z.string().min(1, "INTERNAL_API_KEY is required"),
   ALLOWED_ORIGINS: z.string().optional(), // Comma-separated allowed CORS origins
+  // Symmetric key used by pgcrypto `pgp_sym_encrypt` for airdrop signup
+  // emails (per mini-app-spec.md §Airdrop). Optional at boot so dev
+  // environments without an airdrop signup flow don't need to set it;
+  // the `/airdrop/signup` handler itself returns 503 if missing so a
+  // misconfigured prod doesn't silently store plaintext.
+  AIRDROP_EMAIL_KEY: z.string().optional(),
   // Comma-separated base58 pubkeys allowed to hit admin-only endpoints.
   // Empty / unset env ⇒ empty array ⇒ all admin calls are rejected.
   // Invalid base58 entries ⇒ boot fails with a clear zod error (instead
@@ -54,3 +62,11 @@ if (!parsed.success) {
 
 export const config = parsed.data;
 export type Config = z.infer<typeof envSchema>;
+
+// League preset resolved at boot. Uses the zod-narrowed SOLANA_NETWORK so the
+// single authoritative parse lives in envSchema above (no second process.env read).
+const LEAGUE_PRESETS: Record<Network, LeagueConfig> = {
+  devnet: DEVNET,
+  mainnet: MAINNET,
+};
+export const league: LeagueConfig = LEAGUE_PRESETS[config.SOLANA_NETWORK];

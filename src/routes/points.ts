@@ -1,11 +1,13 @@
 import type { FastifyInstance, FastifyRequest, FastifyReply } from "fastify";
 import { requireWalletAuth, requireApiKey } from "../middleware/auth.js";
 import { rateLimit } from "../middleware/rate-limit.js";
+import { requireIdempotencyKey } from "../middleware/idempotency.js";
 import {
   awardPoints,
   getBalance,
   getHistory,
   batchAward,
+  CapacityExhaustedError,
 } from "../services/points-service.js";
 
 /* -------------------------------------------------------------------------- */
@@ -69,12 +71,10 @@ export async function pointRoutes(app: FastifyInstance): Promise<void> {
       const { wallet } = request.query as BalanceQuery;
 
       if (!wallet) {
-        return reply
-          .status(400)
-          .send({
-            error: "Bad Request",
-            message: "wallet query parameter is required",
-          });
+        return reply.status(400).send({
+          error: "Bad Request",
+          message: "wallet query parameter is required",
+        });
       }
 
       try {
@@ -95,12 +95,10 @@ export async function pointRoutes(app: FastifyInstance): Promise<void> {
         return reply.status(200).send(serializeBalance(balance));
       } catch (err) {
         request.log.error(err, "Failed to fetch balance");
-        return reply
-          .status(500)
-          .send({
-            error: "Internal Server Error",
-            message: "Failed to fetch balance",
-          });
+        return reply.status(500).send({
+          error: "Internal Server Error",
+          message: "Failed to fetch balance",
+        });
       }
     },
   );
@@ -113,12 +111,10 @@ export async function pointRoutes(app: FastifyInstance): Promise<void> {
       const qs = request.query as HistoryQuery;
 
       if (!qs.wallet) {
-        return reply
-          .status(400)
-          .send({
-            error: "Bad Request",
-            message: "wallet query parameter is required",
-          });
+        return reply.status(400).send({
+          error: "Bad Request",
+          message: "wallet query parameter is required",
+        });
       }
 
       const limit = Math.min(
@@ -139,12 +135,10 @@ export async function pointRoutes(app: FastifyInstance): Promise<void> {
         return reply.status(200).send({ events: serialized });
       } catch (err) {
         request.log.error(err, "Failed to fetch history");
-        return reply
-          .status(500)
-          .send({
-            error: "Internal Server Error",
-            message: "Failed to fetch history",
-          });
+        return reply.status(500).send({
+          error: "Internal Server Error",
+          message: "Failed to fetch history",
+        });
       }
     },
   );
@@ -152,7 +146,7 @@ export async function pointRoutes(app: FastifyInstance): Promise<void> {
   /* ------ POST /points/award ------ */
   app.post(
     "/points/award",
-    { preHandler: [requireApiKey, rateLimit()] },
+    { preHandler: [requireApiKey, requireIdempotencyKey, rateLimit()] },
     async (request: FastifyRequest, reply: FastifyReply) => {
       const body = request.body as AwardBody | undefined;
 
@@ -176,6 +170,9 @@ export async function pointRoutes(app: FastifyInstance): Promise<void> {
       }
 
       try {
+        // enforceCapacity=true only when we have a resolved protocol.
+        // Unresolved webhooks (protocolId null) skip the debit — the league
+        // economy can only gate flows attributable to a specific protocol.
         const result = await awardPoints(
           body.wallet_address,
           BigInt(body.amount),
@@ -183,6 +180,7 @@ export async function pointRoutes(app: FastifyInstance): Promise<void> {
           { type: "reference", key: body.idempotency_key },
           body.reason,
           "api",
+          { enforceCapacity: request.protocolId != null },
         );
 
         return reply.status(200).send({
@@ -192,13 +190,18 @@ export async function pointRoutes(app: FastifyInstance): Promise<void> {
           duplicate: result.duplicate ?? false,
         });
       } catch (err) {
-        request.log.error(err, "Failed to award points");
-        return reply
-          .status(500)
-          .send({
-            error: "Internal Server Error",
-            message: "Failed to award points",
+        if (err instanceof CapacityExhaustedError) {
+          return reply.status(409).send({
+            error: "CAPACITY_EXHAUSTED",
+            message: err.message,
+            protocol_id: err.protocolId,
           });
+        }
+        request.log.error(err, "Failed to award points");
+        return reply.status(500).send({
+          error: "Internal Server Error",
+          message: "Failed to award points",
+        });
       }
     },
   );
@@ -217,12 +220,10 @@ export async function pointRoutes(app: FastifyInstance): Promise<void> {
       }
 
       if (body.awards.length > 100) {
-        return reply
-          .status(400)
-          .send({
-            error: "Bad Request",
-            message: "Maximum 100 awards per batch",
-          });
+        return reply.status(400).send({
+          error: "Bad Request",
+          message: "Maximum 100 awards per batch",
+        });
       }
 
       // Validate each award item
@@ -239,12 +240,10 @@ export async function pointRoutes(app: FastifyInstance): Promise<void> {
           });
         }
         if (award.amount <= 0) {
-          return reply
-            .status(400)
-            .send({
-              error: "Bad Request",
-              message: "All amounts must be positive",
-            });
+          return reply.status(400).send({
+            error: "Bad Request",
+            message: "All amounts must be positive",
+          });
         }
       }
 
@@ -275,12 +274,10 @@ export async function pointRoutes(app: FastifyInstance): Promise<void> {
         });
       } catch (err) {
         request.log.error(err, "Failed to batch award points");
-        return reply
-          .status(500)
-          .send({
-            error: "Internal Server Error",
-            message: "Failed to batch award points",
-          });
+        return reply.status(500).send({
+          error: "Internal Server Error",
+          message: "Failed to batch award points",
+        });
       }
     },
   );

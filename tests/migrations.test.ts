@@ -12,12 +12,12 @@ describe("Migration files", () => {
     .filter((f) => f.endsWith(".sql"))
     .sort();
 
-  it("should have exactly 38 migration files", () => {
-    expect(files.length).toBe(38);
+  it("should have exactly 46 migration files", () => {
+    expect(files.length).toBe(46);
   });
 
-  it("should have filenames in correct order (001-038)", () => {
-    for (let i = 0; i < 38; i++) {
+  it("should have filenames in correct order (001-046)", () => {
+    for (let i = 0; i < 46; i++) {
       const expected = String(i + 1).padStart(3, "0");
       expect(files[i]).toMatch(new RegExp(`^${expected}_`));
     }
@@ -74,6 +74,8 @@ describe("Migration files", () => {
       "033_program_profiles.sql": "program_profiles",
       "034_protocol_blinks.sql": "protocol_blinks",
       "037_game_rounds.sql": "game_rounds",
+      "040_league_tables.sql": "milestones",
+      "041_referrals_airdrop.sql": "referrals",
     };
 
     // Migrations that do NOT create a table — each must define a regex the
@@ -87,6 +89,18 @@ describe("Migration files", () => {
         /ALTER TABLE\s+point_events[\s\S]*ADD COLUMN\s+channel/i,
       "038_game_rounds_settle_snapshot.sql":
         /ALTER TABLE\s+game_rounds[\s\S]*ADD COLUMN\s+IF NOT EXISTS\s+settle_timestamp/i,
+      "039_protocols_league_cols.sql":
+        /ALTER TABLE\s+protocols[\s\S]*ADD COLUMN\s+IF NOT EXISTS\s+referral_code/i,
+      "042_rewardz_earnings_protocol_id.sql":
+        /ALTER TABLE\s+rewardz_earnings[\s\S]*ADD COLUMN\s+IF NOT EXISTS\s+protocol_id/i,
+      "043_abuse_flags_open_unique.sql":
+        /CREATE UNIQUE INDEX[\s\S]*abuse_flags_open_unique_idx[\s\S]*WHERE\s+resolved_at IS NULL/i,
+      "044_abuse_flags_daily_cap_kind.sql":
+        /ALTER TABLE\s+abuse_flags[\s\S]*ADD CONSTRAINT[\s\S]*daily_cap_breach/i,
+      "045_rewardz_earnings_reason_unique.sql":
+        /CREATE UNIQUE INDEX[\s\S]*rewardz_earnings_protocol_reason_unique_idx[\s\S]*WHERE\s+milestone_id IS NULL/i,
+      "046_protocols_active_stake.sql":
+        /ALTER TABLE\s+protocols[\s\S]*ADD COLUMN\s+IF NOT EXISTS\s+active_stake/i,
     };
 
     for (const file of files) {

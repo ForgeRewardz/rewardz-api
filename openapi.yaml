@@ -1,0 +1,1515 @@
+openapi: 3.1.0
+info:
+  title: Rewardz API
+  description: |
+    OpenAPI 3.1 surface for the 10 endpoints introduced or changed by
+    TODO-0018 Colosseum Rewardz League. Nine of the ten endpoints are
+    served by the Fastify `api/` service under the `/v1` prefix; the
+    tenth (`GET /rewardz/proof/:authority`) is served by the
+    `mvp-keeper-bot` Rust service and is documented here so SDK +
+    mobile + mini-app consumers can work from a single contract.
+
+    # Scope
+
+    This spec documents ONLY the surface changed by TODO-0018. It is
+    not a complete description of every route in the API; pre-existing
+    endpoints (points balance, auth, quests GET, admin, etc.) are
+    intentionally omitted to keep review tractable. New or
+    behaviour-changed endpoints live here with full request/response
+    schemas.
+
+    # Contract pinning
+
+    The response field names and HTTP status codes in this spec are
+    the contract the SDK (`sdk/packages/sdk`) and mobile app consume.
+    Any field rename in the underlying route handler MUST land here in
+    lockstep or the SDK round-trip tests break.
+
+    # Keeper vs API
+
+    - Base URL for nine endpoints: `https://api.rewardz.example` (path
+      prefix `/v1`).
+    - Base URL for the keeper-served proof endpoint:
+      `https://keeper.rewardz.example` (no `/v1` prefix; the keeper is
+      a separate process with its own Axum router).
+
+  version: 0.1.0-todo18
+  contact:
+    name: Rewardz team
+    url: https://github.com/anthropics/rewardz
+
+servers:
+  - url: https://api.rewardz.example
+    description: Fastify API service — hosts 9 of the 10 TODO-0018 endpoints under /v1
+  - url: https://keeper.rewardz.example
+    description: mvp-keeper-bot — hosts GET /rewardz/proof/:authority
+
+tags:
+  - name: league
+    description: Colosseum Rewardz League lifecycle (join, status)
+  - name: referrals
+    description: Referral-code attribution for the mini-app deep link
+  - name: airdrop
+    description: Email capture for airdrop notification
+  - name: leaderboard
+    description: Public league leaderboard surface
+  - name: discovery
+    description: Mini-app + mobile default discovery tiles
+  - name: rewardz
+    description: On-chain Rewardz claim support — keeper-served Merkle proofs
+  - name: points
+    description: Off-chain points ledger writes (capacity-gated, idempotent)
+  - name: quests
+    description: Protocol-owned quest creation (multi-step composable)
+  - name: intents
+    description: Natural-language intent → ranked Blink offers
+
+paths:
+  # ───────────────────────────────────────────────────────────────
+  # 1. POST /v1/protocols/{id}/league/join
+  # ───────────────────────────────────────────────────────────────
+  /v1/protocols/{id}/league/join:
+    post:
+      tags: [league]
+      summary: Join a protocol to the Colosseum Rewardz League
+      description: |
+        Joins the protocol to the league and performs four idempotent
+        writes in a single transaction:
+
+        1. Allocates a 6-char referral code (Crockford base32, unique)
+           if the protocol does not already have one.
+        2. Inserts a `rewardz_earnings` row for the starter grant
+           (reason `starter_grant`, milestone_id NULL). The partial
+           UNIQUE index on `(protocol_id, reason) WHERE milestone_id
+           IS NULL` makes this at-most-once per protocol.
+        3. Seeds `wallet_weights` rows for declared founder/team
+           wallets using the per-role weights from `league-config.md`.
+           The admin wallet is auto-added as a founder.
+        4. Emits a `protocol_events` row (`league_joined`, info).
+
+        Capacity is NOT initialised here — it unlocks when the
+        starter grant is staked (task 16a stake-watcher).
+
+        # Idempotency
+
+        Calling league/join on an already-joined protocol returns 200
+        with the existing state rather than 409.
+      operationId: joinLeague
+      security:
+        - bearerAuth: []
+      parameters:
+        - $ref: "#/components/parameters/ProtocolId"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/LeagueJoinRequest"
+      responses:
+        "200":
+          description: League membership state (newly created or existing)
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/LeagueJoinResponse"
+        "400":
+          description: Malformed body (non-array wallets, non-base58 pubkey)
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+        "401":
+          description: Missing or invalid bearer token
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+        "403":
+          description: Caller is not the protocol's admin_wallet
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+        "404":
+          description: Protocol not found
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+        "500":
+          description: Transaction failed or referral-code allocation exhausted
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+
+  # ───────────────────────────────────────────────────────────────
+  # 2. GET /v1/protocols/{id}/league/status
+  # ───────────────────────────────────────────────────────────────
+  /v1/protocols/{id}/league/status:
+    get:
+      tags: [league]
+      summary: Read protocol league status for the console dashboard
+      description: |
+        Returns the protocol's league state: visibility, quality
+        score, remaining capacity + baseline, active stake, referral
+        code, declared founder/team wallets, pending (unpublished)
+        Rewardz earnings, open abuse flags, per-wallet weights, and
+        the last 10 protocol_events entries.
+
+        Protected by `requireBearerAuth + requireProtocolOwner` — only
+        the admin sees their own protocol's status. Discovery surfaces
+        use `/discovery/featured` + `/intents/resolve` which already
+        filter on visibility.
+      operationId: getLeagueStatus
+      security:
+        - bearerAuth: []
+      parameters:
+        - $ref: "#/components/parameters/ProtocolId"
+      responses:
+        "200":
+          description: League status snapshot
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/LeagueStatusResponse"
+        "401":
+          description: Missing or invalid bearer token
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+        "403":
+          description: Caller is not the protocol's admin_wallet
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+        "404":
+          description: Protocol not found
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+        "500":
+          description: Server error
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+
+  # ───────────────────────────────────────────────────────────────
+  # 3. POST /v1/referrals/attribute
+  # ───────────────────────────────────────────────────────────────
+  /v1/referrals/attribute:
+    post:
+      tags: [referrals]
+      summary: First-wins attribution of a wallet to a referral code
+      description: |
+        Called by the mini-app when a wallet connects after a
+        `?r=code` deep link. Attribution is first-wins: the first
+        referral to attach to a wallet sticks, subsequent calls for
+        the same wallet are no-ops and return the existing attribution.
+
+        Intentionally unauthenticated — gating on a signed message
+        would break the deep-link flow. Rate-limited to 20 req/minute
+        per IP to blunt referral-code enumeration and wallet-pinning.
+
+        Code matching is case-insensitive server-side.
+      operationId: attributeReferral
+      security: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/ReferralAttributeRequest"
+      responses:
+        "200":
+          description: |
+            Attribution outcome. `attributed=true` means this call won
+            the race; `attributed=false` means the wallet was already
+            attributed and the response echoes the existing binding.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ReferralAttributeResponse"
+        "400":
+          description: Malformed body (bad wallet or code format)
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+        "404":
+          description: Referral code not recognised
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+        "429":
+          description: Rate-limited (20 req/minute per IP)
+          headers:
+            Retry-After:
+              schema:
+                type: integer
+                minimum: 0
+              description: Seconds until the rate-limit window resets
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/RateLimitedError"
+        "500":
+          description: Server error
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+
+  # ───────────────────────────────────────────────────────────────
+  # 4. POST /v1/airdrop/signup
+  # ───────────────────────────────────────────────────────────────
+  /v1/airdrop/signup:
+    post:
+      tags: [airdrop]
+      summary: Store an email for airdrop notification (encrypted at rest)
+      description: |
+        Stores an email tied to a wallet for airdrop notification. The
+        email is encrypted at rest via pgcrypto
+        `pgp_sym_encrypt(email, AIRDROP_EMAIL_KEY)` — plaintext never
+        touches disk.
+
+        # Idempotency
+
+        UNIQUE(wallet) + ON CONFLICT DO UPDATE so re-submitting with a
+        corrected email overwrites. Last-write-wins is deliberate — a
+        user changing their email before distribution is the expected
+        case.
+
+        # Fail-closed on missing key
+
+        If `AIRDROP_EMAIL_KEY` is not configured, the endpoint returns
+        503 rather than silently storing plaintext.
+
+        Rate-limited to 10 req/minute per IP.
+      operationId: airdropSignup
+      security: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/AirdropSignupRequest"
+      responses:
+        "200":
+          description: Signup stored
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/AirdropSignupResponse"
+        "400":
+          description: Malformed body
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+        "429":
+          description: Rate-limited (10 req/minute per IP)
+          headers:
+            Retry-After:
+              schema:
+                type: integer
+                minimum: 0
+              description: Seconds until the rate-limit window resets
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/RateLimitedError"
+        "500":
+          description: Server error
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+        "503":
+          description: AIRDROP_EMAIL_KEY not configured
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+
+  # ───────────────────────────────────────────────────────────────
+  # 5. GET /v1/leaderboard
+  # ───────────────────────────────────────────────────────────────
+  /v1/leaderboard:
+    get:
+      tags: [leaderboard]
+      summary: Colosseum League daily leaderboard snapshot
+      description: |
+        Top-N protocols from the most recent daily leaderboard
+        snapshot (written by mvp-keeper-bot's leaderboard cron).
+        Consumed by mobile + mini-app to render the public leaderboard
+        surface.
+
+        # Visibility rules
+
+        - `hidden` protocols are excluded entirely.
+        - `at_risk` protocols are included with their visibility flag
+          so the client can render them muted.
+        - If no snapshot exists for the requested date (or any date,
+          if `date` is unspecified), `rows` is empty and
+          `snapshotDate` is null.
+
+        # BIGINT serialisation
+
+        All BIGINT counters (`uniqueWallets`, `repeatUsers`,
+        `successfulCompletions`, `bonusAwarded`) serialise as strings
+        to avoid JS `Number` precision loss. Clients can `Number()`
+        them since actual magnitudes are well below 2^53.
+      operationId: getLeaderboard
+      security: []
+      parameters:
+        - in: query
+          name: date
+          required: false
+          schema:
+            type: string
+            pattern: '^\d{4}-\d{2}-\d{2}$'
+          description: Pin to a specific snapshot date (default = latest)
+          example: "2026-04-15"
+        - in: query
+          name: limit
+          required: false
+          schema:
+            type: integer
+            minimum: 1
+            maximum: 100
+            default: 10
+          description: Max rows to return
+      responses:
+        "200":
+          description: Leaderboard snapshot
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/LeaderboardResponse"
+        "400":
+          description: Malformed query parameters
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+        "429":
+          description: Rate-limited (120 req/minute per IP)
+          headers:
+            Retry-After:
+              schema:
+                type: integer
+                minimum: 0
+              description: Seconds until the rate-limit window resets
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/RateLimitedError"
+        "500":
+          description: Server error
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+
+  # ───────────────────────────────────────────────────────────────
+  # 6. GET /v1/discovery/featured
+  # ───────────────────────────────────────────────────────────────
+  /v1/discovery/featured:
+    get:
+      tags: [discovery]
+      summary: Default discovery tiles for mini-app home + mobile discovery
+      description: |
+        Default tiles surface for the mini-app home and mobile
+        discovery screen.
+
+        # Ranking
+
+        1. `hidden` protocols are excluded entirely.
+        2. `at_risk` protocols are kept but dampened to 50% of their
+           quality_score — matches the ranking-engine's
+           AT_RISK_DAMPENER so dashboards, `/intents/resolve`, and
+           this surface all sink at-risk consistently.
+        3. Protocols featured in the latest leaderboard snapshot get
+           a small additive boost (+0.1) so yesterday's winners
+           surface first even when a higher-quality_score protocol
+           exists.
+        4. Ties broken by creation order (deterministic).
+
+        `rank` is null when the protocol isn't present in today's
+        leaderboard snapshot — the tile is still eligible if its
+        quality_score pulls it into the top-N.
+      operationId: getDiscoveryFeatured
+      security: []
+      parameters:
+        - in: query
+          name: limit
+          required: false
+          schema:
+            type: integer
+            minimum: 1
+            maximum: 50
+            default: 6
+          description: Max tiles to return
+      responses:
+        "200":
+          description: Featured tiles
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/DiscoveryFeaturedResponse"
+        "400":
+          description: Malformed query parameters
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+        "429":
+          description: Rate-limited (120 req/minute per IP)
+          headers:
+            Retry-After:
+              schema:
+                type: integer
+                minimum: 0
+              description: Seconds until the rate-limit window resets
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/RateLimitedError"
+        "500":
+          description: Server error
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+
+  # ───────────────────────────────────────────────────────────────
+  # 7. GET /rewardz/proof/{authority}  (KEEPER-SERVED, no /v1 prefix)
+  # ───────────────────────────────────────────────────────────────
+  /rewardz/proof/{authority}:
+    get:
+      tags: [rewardz]
+      servers:
+        - url: https://keeper.rewardz.example
+          description: mvp-keeper-bot — separate service from the Fastify API
+      summary: Merkle proof for `claim_rewardz` (keeper-served)
+      description: |
+        Returns the Keccak256 Merkle proof an on-chain
+        `claim_rewardz` instruction needs to verify leaf membership.
+
+        Hosted by `mvp-keeper-bot` (Axum), NOT the Fastify API — no
+        `/v1` prefix. Same contract for both mobile (mvp-sdk) and
+        mini-app (sdk) consumers.
+
+        # Invariant
+
+        `root` in the response MUST equal the on-chain
+        `RewardzRoot.root` at the moment the response is produced.
+        The handler rebuilds the tree in-process from
+        `rewardz_earnings` and compares to the chain; if they
+        diverge, the endpoint returns 503 rather than issue a proof
+        that `claim_rewardz` would reject.
+
+        # Leaf format
+
+        `leaf = keccak256(authority_pubkey || cumulative_amount_le)`.
+        Epoch is deliberately NOT in the leaf (design
+        `rewardz-claim-design.md`) — the leaf is cumulative, and the
+        program verifies `root` matches the current on-chain root.
+
+        # Hex encoding
+
+        `proof` elements and `root` are lowercase hex strings with a
+        `0x` prefix.
+
+        # valid_until_next_publish_at
+
+        Conservative upper bound (= now + publish interval). The
+        actual staleness boundary is the next successful
+        `set_rewardz_root` tx, which may fire sooner under
+        operator-initiated rehearsal.
+      operationId: getRewardzProof
+      security: []
+      parameters:
+        - in: path
+          name: authority
+          required: true
+          schema:
+            type: string
+            pattern: "^[1-9A-HJ-NP-Za-km-z]{32,44}$"
+          description: Base58 Solana pubkey (the protocol_authority)
+      responses:
+        "200":
+          description: Merkle proof matching the on-chain root
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/RewardzProofResponse"
+        "400":
+          description: Authority is not a valid base58 pubkey
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/KeeperError"
+        "404":
+          description: |
+            Stable "no entry" state: on-chain root is zero-bytes AND
+            the keeper has no earnings for this authority. Safe for
+            clients to treat as "nothing to claim yet".
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/KeeperError"
+        "503":
+          description: |
+            Transient divergence between keeper and chain (RPC
+            failure, account-not-initialised, root-mismatch because
+            keeper is behind, or keeper-ahead-of-chain). Clients
+            should retry after the next publish interval.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/KeeperError"
+        "500":
+          description: Server error (DB read, spawn_blocking panic, etc.)
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/KeeperError"
+
+  # ───────────────────────────────────────────────────────────────
+  # 8. POST /v1/points/award  (CHANGED: capacity + idempotency)
+  # ───────────────────────────────────────────────────────────────
+  /v1/points/award:
+    post:
+      tags: [points]
+      summary: Award points to a wallet (capacity-gated, idempotent)
+      description: |
+        Writes a positive points event to the off-chain ledger.
+
+        # TODO-0018 changes
+
+        - **Capacity gating:** when the caller resolves to a specific
+          protocol (via API key), the award debits
+          `protocols.remaining_capacity`. If the protocol is at zero
+          capacity, the call fails with 409 CAPACITY_EXHAUSTED and
+          surfaces the protocol_id for operator triage.
+        - **Idempotency:** `idempotency_key` in both the body and the
+          `Idempotency-Key` header is now required. Replays return the
+          original result with `duplicate=true` rather than writing
+          again.
+
+        # Header vs body idempotency
+
+        Both `Idempotency-Key` (HTTP header) and `idempotency_key` (JSON
+        body) are required. The `requireIdempotencyKey` middleware
+        enforces the header; the handler's body validator enforces
+        the body field.
+
+        # Authentication
+
+        Requires `X-API-Key` (the protocol's API key). Unresolved
+        webhooks (no API-key-scoped protocol) skip the capacity debit.
+      operationId: awardPoints
+      security:
+        - apiKeyAuth: []
+      parameters:
+        - in: header
+          name: Idempotency-Key
+          required: true
+          schema:
+            type: string
+            minLength: 8
+            maxLength: 128
+            pattern: "^[A-Za-z0-9_-]+$"
+          description: |
+            Client-generated idempotency token — enforced by
+            `requireIdempotencyKey` middleware (api/src/middleware/idempotency.ts).
+            Must be 8-128 chars from `[A-Za-z0-9_-]` (UUIDs, ULIDs, hex, and
+            base58 all pass). The same value must also be sent in the JSON
+            body as `idempotency_key`.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/AwardPointsRequest"
+      responses:
+        "200":
+          description: Points awarded (or replay of prior award)
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/AwardPointsResponse"
+        "400":
+          description: Missing or invalid fields (wallet_address, amount, reason, idempotency_key)
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+        "401":
+          description: Missing or invalid API key
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+        "409":
+          description: Protocol has no remaining capacity for this debit
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/CapacityExhaustedError"
+        "429":
+          description: Rate-limited
+          headers:
+            Retry-After:
+              schema:
+                type: integer
+                minimum: 0
+              description: Seconds until the rate-limit window resets
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/RateLimitedError"
+        "500":
+          description: Server error
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+
+  # ───────────────────────────────────────────────────────────────
+  # 9. POST /v1/protocols/{id}/quests  (EXTENDED: multi-step)
+  # ───────────────────────────────────────────────────────────────
+  /v1/protocols/{id}/quests:
+    post:
+      tags: [quests]
+      summary: Create a quest for a protocol
+      description: |
+        Creates a quest owned by the protocol.
+
+        # TODO-0018 changes
+
+        Quests can now be composed of multiple `steps`, each with its
+        own `intent_type`, `params`, and per-step `points`. Omitting
+        `steps` creates a single-step quest with `steps_required=1`.
+        The `quest_type` defaults to `single`; multi-step callers
+        should set it to the corresponding type from
+        `league-config.md`.
+
+        Protected by `requireBearerAuth + requireProtocolOwner`.
+      operationId: createQuest
+      security:
+        - bearerAuth: []
+      parameters:
+        - $ref: "#/components/parameters/ProtocolId"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/CreateQuestRequest"
+      responses:
+        "201":
+          description: Quest created
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/CreateQuestResponse"
+        "400":
+          description: Missing required field (name)
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+        "401":
+          description: Missing or invalid bearer token
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+        "403":
+          description: Caller is not the protocol's admin_wallet
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+        "500":
+          description: Server error
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+
+  # ───────────────────────────────────────────────────────────────
+  # 10. POST /v1/intents/resolve  (CHANGED: ranking-engine)
+  # ───────────────────────────────────────────────────────────────
+  /v1/intents/resolve:
+    post:
+      tags: [intents]
+      summary: Resolve a natural-language query into ranked Blink offers
+      description: |
+        Resolves a natural-language query + user wallet into a ranked
+        list of Blink offers across active protocols.
+
+        # TODO-0018 changes
+
+        The post-resolution ranking is now handled by
+        `ranking-engine.ts` which applies:
+
+        - Quality-score multiplier per offer's protocol.
+        - `AT_RISK_DAMPENER` (0.5) for at-risk protocols — sink
+          at-risk offers consistently with `/discovery/featured`.
+        - `FEATURED_BOOST` (+0.1) for yesterday-featured protocols.
+        - `trust_score` as a tiebreaker.
+
+        # Authentication
+
+        Requires `requireWalletAuth` — the caller must sign a message
+        proving control of `user_wallet`.
+      operationId: resolveIntent
+      security:
+        - walletAuth: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/ResolveIntentRequest"
+      responses:
+        "200":
+          description: Ranked offers for the query
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ResolveIntentResponse"
+        "400":
+          description: Missing query or user_wallet
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+        "401":
+          description: Missing or invalid wallet signature
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+        "500":
+          description: Resolver or ranking failure
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+
+# ─────────────────────────────────────────────────────────────────
+# Reusable components
+# ─────────────────────────────────────────────────────────────────
+components:
+  parameters:
+    ProtocolId:
+      in: path
+      name: id
+      required: true
+      schema:
+        type: string
+        format: uuid
+      description: Protocol UUID (from POST /v1/protocols/register)
+
+  securitySchemes:
+    bearerAuth:
+      type: http
+      scheme: bearer
+      bearerFormat: signed-message
+      description: |
+        Protocol-owner bearer token obtained from a signed-message
+        auth flow. Enforced by `requireBearerAuth +
+        requireProtocolOwner` middleware on protocol-scoped admin
+        endpoints.
+    apiKeyAuth:
+      type: apiKey
+      in: header
+      name: X-API-Key
+      description: |
+        Protocol API key (prefix `rwz_`). Generated at
+        POST /v1/protocols/register. Used by server-to-server
+        integrations calling `/v1/points/award`.
+    walletAuth:
+      type: apiKey
+      in: header
+      name: X-Wallet-Signature
+      description: |
+        Signed-message wallet auth. The exact header layout is
+        enforced by `requireWalletAuth` middleware and includes the
+        base58 pubkey, signature, and a replay-protection nonce.
+
+  schemas:
+    # ── Shared ────────────────────────────────────────────────
+    Error:
+      type: object
+      required: [error, message]
+      properties:
+        error:
+          type: string
+          description: Short error code (e.g. "Bad Request", "Not Found")
+        message:
+          type: string
+          description: Human-readable diagnostic
+      example:
+        error: Bad Request
+        message: "Invalid body: wallet must be a valid base58 Solana pubkey"
+
+    CapacityExhaustedError:
+      type: object
+      required: [error, message, protocol_id]
+      properties:
+        error:
+          type: string
+          enum: [CAPACITY_EXHAUSTED]
+        message:
+          type: string
+        protocol_id:
+          type: string
+          format: uuid
+      example:
+        error: CAPACITY_EXHAUSTED
+        message: Protocol has no remaining points capacity
+        protocol_id: 00000000-0000-0000-0000-000000000000
+
+    KeeperError:
+      type: object
+      required: [error]
+      properties:
+        error:
+          type: string
+          description: |
+            Keeper-side error string. The keeper's Rust `ErrorResponse`
+            struct (mvp-keeper-bot/src/api.rs) has ONLY the `error` field
+            — no `message` companion. Documented as a distinct schema so
+            SDK consumers don't try to read `message` on keeper responses.
+      example:
+        error: "Invalid authority pubkey"
+
+    RateLimitedError:
+      type: object
+      required: [error, message, retry_after]
+      properties:
+        error:
+          type: string
+          enum: ["Too Many Requests"]
+        message:
+          type: string
+        retry_after:
+          type: integer
+          minimum: 0
+          description: |
+            Seconds until the rate-limit window resets. Matches the
+            `Retry-After` HTTP header emitted alongside the body.
+      example:
+        error: "Too Many Requests"
+        message: "Rate limit exceeded. Try again in 12s."
+        retry_after: 12
+
+    ComposableSuggestion:
+      type: object
+      description: |
+        Reserved for the multi-step composable-quest suggestion surface.
+        Currently no fields are emitted — the handler always returns
+        `composable_suggestions: []`. Defined here so SDK consumers
+        can type the array element as an opaque object rather than
+        `any`.
+      additionalProperties: true
+
+    Base58Pubkey:
+      type: string
+      pattern: "^[1-9A-HJ-NP-Za-km-z]{32,44}$"
+      description: Base58-encoded Solana public key
+
+    BigIntString:
+      type: string
+      pattern: '^-?\d+$'
+      description: |
+        BIGINT value serialised as a string to avoid JS `Number`
+        precision loss. Clients may `Number()` when magnitude is
+        known-safe.
+
+    # ── League Join ───────────────────────────────────────────
+    LeagueJoinRequest:
+      type: object
+      properties:
+        founder_wallets:
+          type: array
+          items:
+            $ref: "#/components/schemas/Base58Pubkey"
+          description: |
+            Declared founder wallets (admin wallet is auto-included).
+            Non-base58 entries are rejected with 400.
+        team_wallets:
+          type: array
+          items:
+            $ref: "#/components/schemas/Base58Pubkey"
+          description: Declared team wallets (de-duped against founders)
+      example:
+        founder_wallets: []
+        team_wallets: []
+
+    LeagueJoinResponse:
+      type: object
+      required:
+        - protocolId
+        - referralCode
+        - starterGrantRewardz
+        - starterGrantIssued
+        - founderWallets
+        - teamWallets
+        - walletWeightsCount
+      properties:
+        protocolId:
+          type: string
+          format: uuid
+        referralCode:
+          type: string
+          pattern: "^[2-9A-HJ-NP-Z]{6}$"
+          description: |
+            6-char Crockford base32 code (uppercase A-Z minus I/L/O
+            and digits 2-9). Matches the allocator in
+            `api/src/services/referral-code.ts`.
+        starterGrantRewardz:
+          type: integer
+          format: int64
+          description: Starter grant size in Rewardz (from league_config.starter_grant_rewardz)
+        starterGrantIssued:
+          type: boolean
+          description: False on idempotent re-join (grant already issued earlier)
+        founderWallets:
+          type: array
+          items:
+            $ref: "#/components/schemas/Base58Pubkey"
+        teamWallets:
+          type: array
+          items:
+            $ref: "#/components/schemas/Base58Pubkey"
+        walletWeightsCount:
+          type: integer
+          description: Number of wallet_weights rows upserted
+
+    # ── League Status ─────────────────────────────────────────
+    LeagueStatusResponse:
+      type: object
+      required:
+        - protocolId
+        - adminWallet
+        - visibility
+        - qualityScore
+        - remainingCapacity
+        - capacityWindowStart
+        - capacityBaseline
+        - activeStake
+        - referralCode
+        - founderWallets
+        - teamWallets
+        - pendingRewardz
+        - openAbuseFlags
+        - walletWeights
+        - recentEvents
+      properties:
+        protocolId:
+          type: string
+          format: uuid
+        adminWallet:
+          $ref: "#/components/schemas/Base58Pubkey"
+        visibility:
+          type: string
+          enum: [active, at_risk, hidden]
+        qualityScore:
+          type: [number, "null"]
+          format: float
+          minimum: 0
+          maximum: 1
+        remainingCapacity:
+          oneOf:
+            - $ref: "#/components/schemas/BigIntString"
+            - type: "null"
+        capacityWindowStart:
+          type: [string, "null"]
+          format: date-time
+        capacityBaseline:
+          $ref: "#/components/schemas/BigIntString"
+          description: Derived from active_stake via capacityBaselineOf()
+        activeStake:
+          oneOf:
+            - $ref: "#/components/schemas/BigIntString"
+            - type: "null"
+        referralCode:
+          type: [string, "null"]
+        founderWallets:
+          type: array
+          items:
+            $ref: "#/components/schemas/Base58Pubkey"
+        teamWallets:
+          type: array
+          items:
+            $ref: "#/components/schemas/Base58Pubkey"
+        pendingRewardz:
+          $ref: "#/components/schemas/BigIntString"
+          description: SUM(rewardz_earnings.amount) WHERE included_in_root_epoch IS NULL
+        openAbuseFlags:
+          type: array
+          items:
+            type: object
+            required: [kind, severity, createdAt]
+            properties:
+              kind:
+                type: string
+              severity:
+                type: string
+              createdAt:
+                type: string
+                format: date-time
+        walletWeights:
+          type: array
+          items:
+            type: object
+            required: [wallet, role, weight]
+            properties:
+              wallet:
+                $ref: "#/components/schemas/Base58Pubkey"
+              role:
+                type: string
+                enum: [founder, team]
+              weight:
+                type: number
+                format: float
+                minimum: 0
+                maximum: 1
+        recentEvents:
+          type: array
+          maxItems: 10
+          items:
+            type: object
+            required: [id, kind, level, payload, createdAt]
+            properties:
+              id:
+                type: string
+              kind:
+                type: string
+              level:
+                type: string
+              payload:
+                description: JSONB payload; shape varies by kind
+              createdAt:
+                type: string
+                format: date-time
+
+    # ── Referrals ─────────────────────────────────────────────
+    ReferralAttributeRequest:
+      type: object
+      required: [wallet, code]
+      properties:
+        wallet:
+          $ref: "#/components/schemas/Base58Pubkey"
+        code:
+          type: string
+          pattern: "^[A-Za-z0-9]{4,16}$"
+          description: |
+            Referral code. Case-insensitive (uppercased server-side
+            before lookup). Pattern is deliberately permissive to
+            accept both current 6-char Crockford codes emitted by
+            league/join (`^[2-9A-HJ-NP-Z]{6}$`) and any legacy
+            protocol-owned codes that predated the league allocator.
+
+    ReferralAttributeResponse:
+      type: object
+      required: [attributed, protocolId, referralCode]
+      properties:
+        attributed:
+          type: boolean
+          description: true = this call won the first-wins race; false = wallet was already bound
+        protocolId:
+          type: string
+          format: uuid
+        referralCode:
+          type: string
+
+    # ── Airdrop ───────────────────────────────────────────────
+    AirdropSignupRequest:
+      type: object
+      required: [wallet, email]
+      properties:
+        wallet:
+          $ref: "#/components/schemas/Base58Pubkey"
+        email:
+          type: string
+          format: email
+          maxLength: 254
+
+    AirdropSignupResponse:
+      type: object
+      required: [ok, updated]
+      properties:
+        ok:
+          type: boolean
+          description: |
+            Always `true` on a 2xx response — the handler only emits
+            this shape after a successful write. Failure modes surface
+            as 4xx/5xx with the shared `Error` envelope, never as
+            `ok: false`.
+        updated:
+          type: boolean
+          description: true = overwrote existing email for this wallet; false = new row
+
+    # ── Leaderboard ───────────────────────────────────────────
+    LeaderboardResponse:
+      type: object
+      required: [snapshotDate, rows]
+      properties:
+        snapshotDate:
+          type: [string, "null"]
+          pattern: '^\d{4}-\d{2}-\d{2}$'
+          description: |
+            Date of the snapshot returned.
+            - When `date` query param is supplied: the handler echoes
+              the caller-supplied date even if no snapshot row exists
+              for it (rows will be empty in that case).
+            - When `date` is omitted: returns the latest snapshot's
+              date, or `null` if no snapshot has ever been written.
+        rows:
+          type: array
+          items:
+            $ref: "#/components/schemas/LeaderboardRow"
+
+    LeaderboardRow:
+      type: object
+      required:
+        - rank
+        - protocolId
+        - adminWallet
+        - qualityScore
+        - visibility
+        - uniqueWallets
+        - repeatUsers
+        - successfulCompletions
+        - bonusAwarded
+        - featured
+      properties:
+        rank:
+          type: integer
+          minimum: 1
+        protocolId:
+          type: string
+          format: uuid
+        adminWallet:
+          $ref: "#/components/schemas/Base58Pubkey"
+        qualityScore:
+          type: [number, "null"]
+          format: float
+          minimum: 0
+          maximum: 1
+        visibility:
+          type: string
+          enum: [active, at_risk]
+        uniqueWallets:
+          $ref: "#/components/schemas/BigIntString"
+        repeatUsers:
+          $ref: "#/components/schemas/BigIntString"
+        successfulCompletions:
+          $ref: "#/components/schemas/BigIntString"
+        bonusAwarded:
+          $ref: "#/components/schemas/BigIntString"
+        featured:
+          type: boolean
+
+    # ── Discovery ─────────────────────────────────────────────
+    DiscoveryFeaturedResponse:
+      type: object
+      required: [tiles]
+      properties:
+        tiles:
+          type: array
+          items:
+            $ref: "#/components/schemas/DiscoveryTile"
+
+    DiscoveryTile:
+      type: object
+      required:
+        - protocolId
+        - adminWallet
+        - qualityScore
+        - visibility
+        - featured
+        - rank
+        - referralCode
+      properties:
+        protocolId:
+          type: string
+          format: uuid
+        adminWallet:
+          $ref: "#/components/schemas/Base58Pubkey"
+        qualityScore:
+          type: [number, "null"]
+          format: float
+          minimum: 0
+          maximum: 1
+        visibility:
+          type: string
+          enum: [active, at_risk]
+        featured:
+          type: boolean
+          description: |
+            Whether the protocol appears in the latest leaderboard
+            snapshot. Computed server-side as
+            `COALESCE(today_rows.featured, false)` — protocols absent
+            from today's snapshot are emitted as `false`, never null.
+        rank:
+          type: [integer, "null"]
+          minimum: 1
+          description: Rank in today's leaderboard (null if not ranked)
+        referralCode:
+          type: [string, "null"]
+
+    # ── Rewardz Proof (keeper-served) ─────────────────────────
+    RewardzProofResponse:
+      type: object
+      required:
+        [cumulative_amount, epoch, proof, root, valid_until_next_publish_at]
+      properties:
+        cumulative_amount:
+          type: integer
+          format: int64
+          minimum: 0
+          description: |
+            Cumulative Rewardz earned by this authority (u64). This
+            is the amount encoded in the leaf.
+        epoch:
+          type: integer
+          format: int64
+          minimum: 0
+          description: |
+            On-chain `RewardzRoot.epoch` at the moment the response
+            was produced. Strictly monotonic (design §Q1).
+        proof:
+          type: array
+          items:
+            type: string
+            pattern: "^0x[0-9a-f]{64}$"
+          description: |
+            Hex-encoded (0x-prefixed) sibling Keccak256 hashes,
+            ordered leaf → root.
+        root:
+          type: string
+          pattern: "^0x[0-9a-f]{64}$"
+          description: |
+            Hex-encoded (0x-prefixed) Keccak256 root. MUST equal the
+            on-chain `RewardzRoot.root` at response time — keeper
+            rejects with 503 if they diverge.
+        valid_until_next_publish_at:
+          type: string
+          format: date-time
+          description: |
+            Conservative upper bound on proof freshness (now +
+            publish_interval_secs). Clients should re-fetch after
+            this time.
+
+    # ── Points ────────────────────────────────────────────────
+    AwardPointsRequest:
+      type: object
+      required: [wallet_address, amount, reason, idempotency_key]
+      properties:
+        wallet_address:
+          $ref: "#/components/schemas/Base58Pubkey"
+        amount:
+          type: integer
+          minimum: 1
+          description: Points to award (positive integer)
+        reason:
+          type: string
+          description: Free-text reason (e.g. "quest_complete:abc123")
+        idempotency_key:
+          type: string
+          minLength: 8
+          maxLength: 128
+          pattern: "^[A-Za-z0-9_-]+$"
+          description: |
+            Caller-generated idempotency key. MUST also be sent as
+            the `Idempotency-Key` HTTP header with the SAME value; the
+            middleware and body validator both enforce presence, and
+            `point_events.source_reference` has a UNIQUE constraint that
+            drives dedupe.
+
+    AwardPointsResponse:
+      type: object
+      required: [success, duplicate]
+      properties:
+        success:
+          type: boolean
+        event_id:
+          type: string
+          description: |
+            Primary key of the point_events row. OMITTED (JSON field
+            absent, not null) when the service returns no event id —
+            e.g. a duplicate replay that resolves without writing a
+            new row. Clients should treat "field missing" and
+            "duplicate=true" as equivalent signals.
+        new_balance:
+          $ref: "#/components/schemas/BigIntString"
+          description: |
+            Wallet's total points after the award (serialised as string
+            to preserve BIGINT precision). OMITTED when the service
+            returns no balance alongside the response (e.g. duplicate
+            replays where the balance isn't re-queried).
+        duplicate:
+          type: boolean
+          description: true = replay of a prior award with the same idempotency_key
+
+    # ── Quests ────────────────────────────────────────────────
+    CreateQuestRequest:
+      type: object
+      required: [name]
+      properties:
+        name:
+          type: string
+          minLength: 1
+        description:
+          type: string
+        quest_type:
+          type: string
+          default: single
+          description: |
+            Quest kind — `single` for one-shot, or a type from
+            league-config.md for multi-step composable quests.
+        reward_points:
+          type: integer
+          minimum: 0
+          default: 0
+        max_participants:
+          type: [integer, "null"]
+          minimum: 1
+        start_at:
+          type: [string, "null"]
+          format: date-time
+        end_at:
+          type: [string, "null"]
+          format: date-time
+        steps:
+          type: array
+          description: |
+            Multi-step composable quest definition. Omit for a
+            single-step quest. Order in the array = step_index.
+          items:
+            $ref: "#/components/schemas/QuestStep"
+
+    QuestStep:
+      type: object
+      required: [intent_type]
+      properties:
+        intent_type:
+          type: string
+          description: Intent type string (matches ranking-engine taxonomy)
+        params:
+          type: object
+          additionalProperties: true
+          description: Arbitrary JSONB params captured per step
+        points:
+          type: integer
+          minimum: 0
+          default: 0
+
+    CreateQuestResponse:
+      type: object
+      required: [quest_id, protocol_id, name, quest_type, status, created_at]
+      properties:
+        quest_id:
+          type: string
+          format: uuid
+        protocol_id:
+          type: string
+          format: uuid
+        name:
+          type: string
+        quest_type:
+          type: string
+        status:
+          type: string
+          enum: [active]
+        created_at:
+          type: string
+          format: date-time
+
+    # ── Intents ───────────────────────────────────────────────
+    ResolveIntentRequest:
+      type: object
+      required: [query, user_wallet]
+      properties:
+        query:
+          type: string
+          minLength: 1
+          description: Natural-language query (e.g. "earn points staking sol")
+        user_wallet:
+          $ref: "#/components/schemas/Base58Pubkey"
+        filters:
+          type: object
+          properties:
+            action_type:
+              type: string
+              description: Restrict to a specific action_type taxonomy value
+            protocol:
+              type: string
+              format: uuid
+              description: Restrict to offers from a single protocol_id
+
+    ResolveIntentResponse:
+      type: object
+      required:
+        [
+          intent,
+          resolver_type,
+          resolver_confidence,
+          offers,
+          composable_suggestions,
+        ]
+      properties:
+        intent:
+          type: string
+          description: Inferred action_type from the resolver
+        resolver_type:
+          type: string
+          description: Which resolver branch fired (taxonomy/LLM/fallback)
+        resolver_confidence:
+          type: number
+          format: float
+          minimum: 0
+          maximum: 1
+        offers:
+          type: array
+          items:
+            $ref: "#/components/schemas/RankedOffer"
+        composable_suggestions:
+          type: array
+          description: Reserved for multi-step suggestions (currently empty)
+          items:
+            $ref: "#/components/schemas/ComposableSuggestion"
+
+    RankedOffer:
+      type: object
+      required: [protocol_id, action_type, points, trust_score]
+      properties:
+        protocol_id:
+          type: string
+          format: uuid
+        action_type:
+          type: string
+        points:
+          type: integer
+          minimum: 0
+        trust_score:
+          type: number
+          format: float
+        rank_score:
+          type: number
+          format: float
+          description: Ranking-engine score (quality_score * dampeners + boosts)

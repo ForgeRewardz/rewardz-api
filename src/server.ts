@@ -19,6 +19,10 @@ import { questRoutes } from "./routes/quests.js";
 import { leaderboardRoutes } from "./routes/leaderboards.js";
 import { adminRoutes } from "./routes/admin.js";
 import { campaignRoutes } from "./routes/campaigns.js";
+import { referralRoutes } from "./routes/referrals.js";
+import { airdropRoutes } from "./routes/airdrop.js";
+import { leagueLeaderboardRoutes } from "./routes/leaderboard.js";
+import { discoveryRoutes } from "./routes/discovery.js";
 import { idlUploadRoutes } from "./routes/idl-upload.js";
 import { blinksPublishRoutes } from "./routes/blinks-publish.js";
 import { blinksRuntimeRoutes } from "./routes/blinks-runtime.js";
@@ -101,6 +105,10 @@ export function buildApp() {
   app.register(leaderboardRoutes, { prefix: "/v1" });
   app.register(adminRoutes, { prefix: "/v1" });
   app.register(campaignRoutes, { prefix: "/v1" });
+  app.register(referralRoutes, { prefix: "/v1" });
+  app.register(airdropRoutes, { prefix: "/v1" });
+  app.register(leagueLeaderboardRoutes, { prefix: "/v1" });
+  app.register(discoveryRoutes, { prefix: "/v1" });
 
   // §15G IDL + blinks route families. idlUploadRoutes and
   // blinksPublishRoutes are authenticated (requireBearerAuth +

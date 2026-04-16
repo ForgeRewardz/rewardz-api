@@ -6,6 +6,13 @@ import {
   upsertUserSeasonScore,
 } from "./leaderboard-service.js";
 import type { Channel } from "./leaderboard-service.js";
+import {
+  CapacityExhaustedError,
+  debitCapacity,
+  emitCapacityEvent,
+} from "./capacity.js";
+
+export { CapacityExhaustedError };
 
 /* -------------------------------------------------------------------------- */
 /*  Types                                                                     */
@@ -75,6 +82,7 @@ export async function awardPoints(
   source: { type: "signature" | "reference" | "completion"; key: string },
   reason?: string,
   channel: Channel = "completion",
+  opts: { enforceCapacity?: boolean } = {},
 ): Promise<PointAwardResult> {
   const client = await pool.connect();
 
@@ -116,6 +124,19 @@ export async function awardPoints(
       [wallet],
     );
 
+    // League capacity debit — gated by opts.enforceCapacity so legacy callers
+    // (e.g. webhook / game-loop awards) that pre-date the league economy keep
+    // working. The /v1/points/award route passes enforceCapacity=true when a
+    // protocolId is resolved. Throws CapacityExhaustedError → route maps to
+    // 409. Runs BEFORE the point_events INSERT so a capacity failure leaves
+    // no trace of the award (ROLLBACK atomically unwinds both debits).
+    let capacityCrossing: Awaited<ReturnType<typeof debitCapacity>>["crossed"] =
+      null;
+    if (opts.enforceCapacity && protocolId !== null) {
+      const res = await debitCapacity(client, protocolId, amount);
+      capacityCrossing = res.crossed;
+    }
+
     // Insert point event
     const signatureVal = source.type === "signature" ? source.key : null;
     const referenceVal =
@@ -139,6 +160,12 @@ export async function awardPoints(
     );
 
     const eventId = insertResult.rows[0].id;
+
+    // Threshold emit (task 12). Must land in the same tx as the debit so a
+    // ROLLBACK removes the warning alongside the would-be award.
+    if (capacityCrossing && protocolId !== null) {
+      await emitCapacityEvent(client, protocolId, capacityCrossing);
+    }
 
     // Update user_balances and atomically retrieve totals via RETURNING
     const balResult = await client.query<{

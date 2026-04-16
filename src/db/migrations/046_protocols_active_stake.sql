@@ -1,0 +1,35 @@
+-- 046 — Colosseum Rewardz League: mirror of on-chain `ProtocolStake` total.
+--
+-- Task 16a introduces the stake-to-unlock-capacity flow: a keeper cron
+-- (`mvp-keeper-bot/src/stake_watcher.rs`) polls each protocol's
+-- `ProtocolStake` PDA (direct_stake + rented_stake) and writes the sum
+-- here. Downstream consumers (capacity threshold math, league/status
+-- handler, discovery surface) then use this column to compute the
+-- per-protocol capacity baseline as `issuance_ratio × active_stake`,
+-- replacing the static `starter_grant_rewardz` baseline for protocols
+-- that have staked.
+--
+-- NULL means "watcher has not yet observed a stake for this protocol"
+-- (either the PDA does not exist yet, or the watcher has not run since
+-- the protocol joined the league). Downstream callers treat NULL as
+-- "fall back to starter_grant_rewardz" so an unstaked protocol keeps
+-- its starter grant as the denominator.
+--
+-- 0 is distinct from NULL: 0 means "watcher has run and observed that
+-- the PDA is zeroed" (e.g. the protocol fully unstaked). This lets us
+-- distinguish "not yet bootstrapped" (NULL → starter grant) from
+-- "explicitly zero stake" (0 → baseline is zero, no capacity) without
+-- adding a second sentinel column.
+ALTER TABLE protocols
+    ADD COLUMN IF NOT EXISTS active_stake BIGINT,
+    -- Sticky marker set by stake_watcher the first time a protocol
+    -- transitions from unstaked to any non-zero stake. Gates the
+    -- "reset remaining_capacity + capacity_window_start + emit
+    -- capacity_unlocked event" branch so a protocol cannot cycle
+    -- unstake → re-stake to refresh its capacity window mid-cycle
+    -- (would otherwise be a capacity-farming vector against the
+    -- weekly/yearly reset cadence in capacity_reset.rs). NULL = not
+    -- yet unlocked; once set, never cleared. Subsequent stake
+    -- changes still update `active_stake` but leave the window
+    -- alone so the regular capacity_reset cron owns the refresh.
+    ADD COLUMN IF NOT EXISTS capacity_unlocked_at TIMESTAMPTZ;
