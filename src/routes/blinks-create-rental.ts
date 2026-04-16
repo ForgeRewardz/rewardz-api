@@ -331,8 +331,8 @@ export async function blinksCreateRentalRoutes(
           },
           {
             name: "maxFee",
-            label: "Max fee (reward rate per epoch, lamports)",
-            required: true,
+            label: "Max fee (reward rate per epoch, lamports; optional)",
+            required: false,
           },
         ];
 
@@ -415,13 +415,22 @@ export async function blinksCreateRentalRoutes(
           "`duration` must be a base-10 u64 string",
         );
       }
-      const rewardRatePerEpoch = parseU64(maxFeeRaw);
-      if (rewardRatePerEpoch === null) {
-        return sendActionError(
-          reply,
-          400,
-          "`maxFee` must be a base-10 u64 string",
-        );
+      // `maxFee` is optional per the Blink spec — when absent, default to 0
+      // (user accepts the protocol's posted reward rate). Only validate shape
+      // when the field is supplied.
+      let rewardRatePerEpoch: bigint;
+      if (maxFeeRaw === undefined || maxFeeRaw === "") {
+        rewardRatePerEpoch = 0n;
+      } else {
+        const parsed = parseU64(maxFeeRaw);
+        if (parsed === null) {
+          return sendActionError(
+            reply,
+            400,
+            "`maxFee` must be a base-10 u64 string when provided",
+          );
+        }
+        rewardRatePerEpoch = parsed;
       }
 
       const protocol = await loadProtocolAuthority(request.params.protocolId);
