@@ -43,7 +43,7 @@ export function buildApp() {
 
   const allowedOrigins = config.ALLOWED_ORIGINS
     ? config.ALLOWED_ORIGINS.split(",").map((o) => o.trim())
-    : ["http://localhost:3000"];
+    : ["http://localhost:3002", "http://localhost:4001"];
 
   // CORS exemption for Solana Actions routes (Klaus A5):
   // `/v1/blinks/*` and `/actions.json` are hit by dial.to (which

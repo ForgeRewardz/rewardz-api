@@ -2,6 +2,18 @@
 
 Fastify REST API powering the REWARDZ mobile app. Handles intent resolution, points accounting, quests, protocol management, delegations, subscriptions, and social verification.
 
+## Local dev
+
+Part of the REWARDZ `mobileSpecs/` stack. For the full local setup (shared env, docker compose, bootstrap orchestrator), see [`../LOCAL-SETUP.md`](../LOCAL-SETUP.md).
+
+Quick path (from mobileSpecs/ root):
+
+```bash
+cp .env.shared.example .env.shared && $EDITOR .env.shared
+./scripts/bootstrap-local.sh
+# api now on http://localhost:3001/healthz
+```
+
 ## Running Locally
 
 Prerequisites: Node 22+, pnpm, PostgreSQL 16 running on `localhost:5432`.

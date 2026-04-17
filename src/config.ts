@@ -16,7 +16,15 @@ const envSchema = z.object({
   SOLANA_RPC_URL: z.string().default("https://api.devnet.solana.com"),
   // Colosseum Rewardz League preset selector. Unknown values fail fast on boot
   // via zod — there is no silent fall-through (per league-config.md).
-  SOLANA_NETWORK: z.enum(["devnet", "mainnet"]).default("devnet"),
+  // `localnet` is accepted (for local surfpool dev) and transformed to `devnet`
+  // since the LeagueConfig preset is identical; keeps the downstream Network
+  // type narrow (devnet | mainnet) while matching the canonical env value in
+  // mobileSpecs/.env.shared.example. Mirrors the shadow mapping already in
+  // mvp-smart-contracts/setup.sh:75-82.
+  SOLANA_NETWORK: z
+    .enum(["devnet", "mainnet", "localnet"])
+    .default("devnet")
+    .transform((v): Network => (v === "localnet" ? "devnet" : v)),
   GEMINI_API_KEY: z.string().optional(), // Optional: rules-based fallback when unavailable
   TWITTER_BEARER_TOKEN: z.string().optional(), // Optional: tweet verification is stubbed
   ZEALY_DEFAULT_SECRET: z.string().optional(),
