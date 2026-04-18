@@ -1,10 +1,13 @@
 import type { FastifyInstance, FastifyReply, FastifyRequest } from "fastify";
+import { rateLimit } from "../middleware/rate-limit.js";
+import { gameEvents } from "../services/game-event-listener.js";
 import {
   getCurrentRound,
   getRoundHistory,
   getRoundPlayers,
   getRoundResults,
   getRoundStatus,
+  type ParsedGameEvent,
 } from "../services/game-service.js";
 
 interface WalletQuery {
@@ -130,6 +133,73 @@ export async function gameRoutes(app: FastifyInstance): Promise<void> {
         request.log.error(err, "Failed to fetch game round results");
         return internalError(reply, "Failed to fetch game round results");
       }
+    },
+  );
+
+  // §4.3 / §10.2 — redacted joiner stream.
+  //
+  // Server-Sent-Events feed of `PlayerDeployed` events. We DO NOT expose the
+  // full wallet, the points deployed, or the fee — this is the public
+  // "player X just joined" ticker that backs the mobile mini-app's social
+  // proof block. Only wallet suffix (3+2 chars) and timestamp leak.
+  //
+  // The emitter (`gameEvents`) is populated by `startGameEventListener`;
+  // we subscribe per-connection and detach on `close`/`aborted` so we
+  // never leak listeners. A 20s `:ping\n\n` keepalive prevents
+  // intermediaries (Nginx, Railway proxy) from killing idle connections.
+  app.get(
+    "/game/round/joiners",
+    { preHandler: [rateLimit(60_000, 120)] },
+    async (request: FastifyRequest, reply: FastifyReply) => {
+      const { roundId: filterRoundId } = request.query as {
+        roundId?: string;
+      };
+
+      reply.raw.writeHead(200, {
+        "Content-Type": "text/event-stream",
+        "Cache-Control": "no-cache, no-transform",
+        Connection: "keep-alive",
+        "X-Accel-Buffering": "no",
+      });
+      // Flush buffers with an immediate comment frame so clients know the
+      // handshake is open (important on CDNs that buffer until first byte).
+      reply.raw.write(":ready\n\n");
+
+      const listener = (event: ParsedGameEvent, _sig: string): void => {
+        if (event.eventName !== "PlayerDeployed") return;
+        if (filterRoundId && event.roundId !== filterRoundId) return;
+        const wallet = event.walletAddress;
+        if (!wallet || wallet.length < 6) return;
+        const walletSuffix = `${wallet.slice(0, 3)}…${wallet.slice(-2)}`;
+        // Redacted payload — roundId, walletSuffix, timestamp. Nothing
+        // else. Never include points, fee, full wallet, email, or any
+        // other field from the source event.
+        const payload = JSON.stringify({
+          roundId: event.roundId,
+          walletSuffix,
+          t: new Date().toISOString(),
+        });
+        reply.raw.write(`event: joined\ndata: ${payload}\n\n`);
+      };
+      gameEvents.on("event", listener);
+
+      const keepalive = setInterval(() => {
+        reply.raw.write(":ping\n\n");
+      }, 20_000);
+
+      let cleanedUp = false;
+      const cleanup = (): void => {
+        if (cleanedUp) return;
+        cleanedUp = true;
+        clearInterval(keepalive);
+        gameEvents.off("event", listener);
+      };
+      request.raw.on("close", cleanup);
+      request.raw.on("aborted", cleanup);
+
+      // Hijack the reply — Fastify must not auto-send a body or close the
+      // stream. Returning the raw reply signals we've taken control.
+      return reply;
     },
   );
 }
