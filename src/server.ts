@@ -30,7 +30,10 @@ import { blinksUserStakeRoutes } from "./routes/blinks-user-stake.js";
 import { blinksCreateRentalRoutes } from "./routes/blinks-create-rental.js";
 import { actionsJsonRoutes } from "./routes/actions-json.js";
 import { healthRoutes } from "./routes/health.js";
-import { closeDiscoveryQueue } from "./services/bullmq.js";
+import {
+  closeDiscoveryQueue,
+  startDiscoveryWorker,
+} from "./services/bullmq.js";
 
 export function buildApp() {
   const app = Fastify({ logger: true });
@@ -136,10 +139,26 @@ export function buildApp() {
   // underlying ioredis connection when Fastify tears down. Without this
   // the process hangs on SIGTERM because ioredis keeps an open socket.
   // Registered AFTER route plugins so the queue closes after the HTTP
-  // server stops accepting new requests.
+  // server stops accepting new requests. `closeDiscoveryQueue` now also
+  // tears down the discovery-runner worker singleton (see
+  // services/bullmq.ts), so this single hook covers producer + consumer.
   app.addHook("onClose", async () => {
     await closeDiscoveryQueue();
   });
+
+  // Start the scheduled-discovery BullMQ worker. Fire-and-forget:
+  // `startDiscoveryWorker` is idempotent so a second buildApp() in tests
+  // reuses the singleton. Gated on DISCOVERY_WORKER_ENABLED so API-only
+  // replicas (sharing Redis with a dedicated worker process) can skip
+  // consuming jobs entirely. Errors in worker boot are logged but don't
+  // fail app boot — the HTTP surface is still useful without scheduled
+  // runs, and the failure is visible via the `error` event handler on
+  // the Worker itself.
+  if (config.DISCOVERY_WORKER_ENABLED) {
+    startDiscoveryWorker().catch((err) => {
+      app.log.error(err, "Failed to start discovery-runner worker");
+    });
+  }
 
   return app;
 }

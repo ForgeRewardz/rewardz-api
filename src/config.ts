@@ -43,6 +43,20 @@ const envSchema = z.object({
   // Max pending+running scheduled discovery tasks per wallet.
   // See mini-app-ux-spec.md §7.6.
   DISCOVERY_MAX_SCHEDULED: z.coerce.number().int().positive().default(5),
+  // Whether this process should run the discovery-runner BullMQ worker.
+  // Default true so single-instance deployments "just work"; set to
+  // false for API-only replicas that share a Redis with a dedicated
+  // worker process (the producer + consumer share the same queue name
+  // either way). Also useful in tests that don't want a worker racing
+  // against manual job manipulation.
+  // Env values are always strings, and `z.coerce.boolean()` delegates to
+  // JS `Boolean("false")` which returns `true` (any non-empty string is
+  // truthy). The `enum + transform` idiom below is the standard zod
+  // pattern for env booleans — "false" stays false, typos fail boot.
+  DISCOVERY_WORKER_ENABLED: z
+    .enum(["true", "false"])
+    .default("true")
+    .transform((v) => v === "true"),
   JWT_SECRET: z.string().min(1, "JWT_SECRET is required"),
   INTERNAL_API_KEY: z.string().min(1, "INTERNAL_API_KEY is required"),
   ALLOWED_ORIGINS: z.string().optional(), // Comma-separated allowed CORS origins

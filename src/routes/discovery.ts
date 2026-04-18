@@ -11,11 +11,12 @@ import {
 import { discoveryQueue } from "../services/bullmq.js";
 import { consumeQuota, readQuota } from "../services/discovery-quota.js";
 import {
-  type IntentResult,
-  resolveIntent,
-} from "../services/intent-resolver.js";
+  formatAssistantText,
+  resolverFellBackToRules,
+} from "../services/discovery-format.js";
+import { resolveIntent } from "../services/intent-resolver.js";
+import { listActiveProtocols } from "../services/protocol-registry.js";
 import { BASE58_PUBKEY } from "../types/solana.js";
-import type { IntentAction, Protocol } from "../types/index.js";
 
 /* -------------------------------------------------------------------------- */
 /*  Validation                                                                */
@@ -100,69 +101,6 @@ const SUGGESTION_SEED: readonly string[] = [
   "borrow 50 USDC on kamino",
 ] as const;
 
-/**
- * Human-readable assistant reply for a resolved intent. Deterministic — no
- * LLM in the loop — so tests can assert on exact substrings and the
- * mini-app composer can render without a second round-trip.
- */
-function formatAssistantText(result: IntentResult): string {
-  const params = result.params as Record<string, unknown>;
-  const amount =
-    typeof params.amount === "number"
-      ? String(params.amount)
-      : typeof params.amount_in === "number"
-        ? String(params.amount_in)
-        : null;
-  const asset =
-    typeof params.asset === "string"
-      ? params.asset
-      : typeof params.asset_in === "string"
-        ? params.asset_in
-        : null;
-
-  switch (result.action_type as IntentAction) {
-    case "stake":
-      return amount && asset
-        ? `I can help you stake ${amount} ${asset}.`
-        : asset
-          ? `I can help you stake ${asset}.`
-          : "I can help you stake.";
-    case "swap": {
-      const assetOut =
-        typeof params.asset_out === "string" ? params.asset_out : null;
-      if (amount && asset && assetOut) {
-        return `I can help you swap ${amount} ${asset} to ${assetOut}.`;
-      }
-      if (asset && assetOut) {
-        return `I can help you swap ${asset} to ${assetOut}.`;
-      }
-      return "I can help you swap tokens.";
-    }
-    case "lend":
-      return amount && asset
-        ? `I can help you lend ${amount} ${asset}.`
-        : "I can help you lend.";
-    case "borrow":
-      return amount && asset
-        ? `I can help you borrow ${amount} ${asset}.`
-        : "I can help you borrow.";
-    case "transfer":
-      return amount
-        ? `I can help you transfer ${amount}.`
-        : "I can help you transfer.";
-    case "mint":
-      return "I can help you mint.";
-    case "vote":
-      return "I can help you vote.";
-    case "tweet":
-      return "I can help you post on X.";
-    case "burn":
-      return "I can help you burn tokens.";
-    default:
-      return "I'm not sure I can do that yet — here are some things you can try.";
-  }
-}
-
 /* -------------------------------------------------------------------------- */
 /*  /discovery/schedule validation + helpers                                  */
 /* -------------------------------------------------------------------------- */
@@ -198,21 +136,6 @@ function nextUtcMidnightIso(): string {
     ),
   );
   return next.toISOString();
-}
-
-/**
- * Fetch the active-protocol registry. Duplicates the SELECT in
- * routes/intents.ts on purpose — modifying intents.ts is out of scope for
- * this task and the query is small enough that drift is easy to eyeball.
- */
-async function fetchActiveProtocols(): Promise<Protocol[]> {
-  const result = await query<Protocol>(
-    `SELECT id, admin_wallet, name, description, blink_base_url, supported_actions,
-            trust_score, status, created_at, updated_at
-       FROM protocols
-      WHERE status = 'active'`,
-  );
-  return result.rows;
 }
 
 /* -------------------------------------------------------------------------- */
@@ -388,7 +311,7 @@ export async function discoveryRoutes(app: FastifyInstance): Promise<void> {
           });
         }
 
-        const protocols = await fetchActiveProtocols();
+        const protocols = await listActiveProtocols();
         const result = await resolveIntent(text, wallet, protocols);
 
         const matches = result.offers.map((o) => ({
@@ -398,8 +321,7 @@ export async function discoveryRoutes(app: FastifyInstance): Promise<void> {
           points: o.points,
         }));
 
-        const fellBackToRules =
-          Boolean(config.GEMINI_API_KEY) && result.resolver_type === "rules";
+        const fellBackToRules = resolverFellBackToRules(result);
 
         // Only surface suggestions when we couldn't find a matching
         // protocol — otherwise the composer shows both matches AND
