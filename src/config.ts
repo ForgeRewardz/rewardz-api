@@ -37,6 +37,12 @@ const envSchema = z.object({
   // Per-wallet, per-UTC-day free discovery-search quota before the composer
   // prompts the user to schedule for tomorrow. See mini-app-ux-spec.md §7.2.
   DISCOVERY_FREE_QUOTA_PER_DAY: z.coerce.number().int().positive().default(3),
+  // BullMQ backend. Used by the discovery-runner worker + the
+  // /discovery/schedule endpoint that enqueues jobs.
+  REDIS_URL: z.string().default("redis://localhost:6379"),
+  // Max pending+running scheduled discovery tasks per wallet.
+  // See mini-app-ux-spec.md §7.6.
+  DISCOVERY_MAX_SCHEDULED: z.coerce.number().int().positive().default(5),
   JWT_SECRET: z.string().min(1, "JWT_SECRET is required"),
   INTERNAL_API_KEY: z.string().min(1, "INTERNAL_API_KEY is required"),
   ALLOWED_ORIGINS: z.string().optional(), // Comma-separated allowed CORS origins

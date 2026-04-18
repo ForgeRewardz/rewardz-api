@@ -30,6 +30,7 @@ import { blinksUserStakeRoutes } from "./routes/blinks-user-stake.js";
 import { blinksCreateRentalRoutes } from "./routes/blinks-create-rental.js";
 import { actionsJsonRoutes } from "./routes/actions-json.js";
 import { healthRoutes } from "./routes/health.js";
+import { closeDiscoveryQueue } from "./services/bullmq.js";
 
 export function buildApp() {
   const app = Fastify({ logger: true });
@@ -131,11 +132,41 @@ export function buildApp() {
   // Health check at root (no prefix)
   app.register(healthRoutes);
 
+  // Graceful shutdown hook: close the lazy BullMQ discovery queue + its
+  // underlying ioredis connection when Fastify tears down. Without this
+  // the process hangs on SIGTERM because ioredis keeps an open socket.
+  // Registered AFTER route plugins so the queue closes after the HTTP
+  // server stops accepting new requests.
+  app.addHook("onClose", async () => {
+    await closeDiscoveryQueue();
+  });
+
   return app;
 }
 
 async function main() {
   const app = buildApp();
+
+  // Idempotent shutdown: Fastify's `app.close()` fires the `onClose`
+  // hook chain (which includes closeDiscoveryQueue) before resolving,
+  // so one call here is sufficient to tear down HTTP + BullMQ cleanly.
+  // We use `process.once` so a second signal during shutdown doesn't
+  // re-enter the handler; if the first close hangs the operator can
+  // still SIGKILL.
+  let shuttingDown = false;
+  const shutdown = async (signal: string) => {
+    if (shuttingDown) return;
+    shuttingDown = true;
+    app.log.info({ signal }, "Received shutdown signal, closing server");
+    try {
+      await app.close();
+    } catch (err) {
+      app.log.error(err, "Error during shutdown");
+    }
+    process.exit(0);
+  };
+  process.once("SIGTERM", () => shutdown("SIGTERM"));
+  process.once("SIGINT", () => shutdown("SIGINT"));
 
   try {
     await app.listen({ port: config.PORT, host: "0.0.0.0" });
