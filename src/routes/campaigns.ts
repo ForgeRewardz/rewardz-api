@@ -20,8 +20,26 @@
 
 import type { FastifyInstance, FastifyReply, FastifyRequest } from "fastify";
 import { z } from "zod";
-import { requireBearerAuth, requireProtocolOwner } from "../middleware/auth.js";
+import {
+  requireBearerAuth,
+  requireProtocolOwner,
+  requireWalletAuth,
+} from "../middleware/auth.js";
 import { query } from "../db/client.js";
+import { awardPoints } from "../services/points-service.js";
+
+/* -------------------------------------------------------------------------- */
+/*  Constants                                                                 */
+/* -------------------------------------------------------------------------- */
+
+/**
+ * Deterministic UUID for the wallet-connect bonus campaign row seeded by
+ * `scripts/seed-rewardz-protocol.sql`. The mini-app-ux-spec.md §6 flow
+ * pins this campaign as the single source of truth for the 100-point
+ * wallet-connect bonus — hard-coding the UUID here keeps the claim route
+ * a single indexed lookup instead of a brittle `WHERE name = ...` scan.
+ */
+const WALLET_CONNECT_CAMPAIGN_ID = "00000000-0000-4000-8000-000000000002";
 
 /* -------------------------------------------------------------------------- */
 /*  Validation schemas                                                        */
@@ -96,6 +114,28 @@ const listCampaignsQuerySchema = z
     page: z.coerce.number().int().positive().default(1),
   })
   .strict();
+
+/**
+ * Body for POST /campaigns/wallet-connect/claim.
+ *
+ * `wallet` MUST match the authenticated wallet from `requireWalletAuth`
+ * — the handler enforces equality and 403s otherwise. We still require
+ * it on the body so the payload matches the rest of the campaign/award
+ * surfaces and so a log line captures the claimed wallet explicitly.
+ *
+ * `ref` is an optional 4..32 alphanumeric referral code sourced from
+ * `localStorage.rewardz.ref` by the mini-app. Attribution is best-effort
+ * — the handler only logs it today (see handler comments for why we do
+ * NOT make an internal HTTP hop to /v1/referrals/attribute).
+ */
+const walletConnectClaimBodySchema = z
+  .object({
+    wallet: z.string().min(1),
+    ref: z.string().min(1).max(32).optional(),
+  })
+  .strict();
+
+type WalletConnectClaimBody = z.infer<typeof walletConnectClaimBodySchema>;
 
 /* -------------------------------------------------------------------------- */
 /*  Status transition rules                                                   */
@@ -538,6 +578,129 @@ export async function campaignRoutes(app: FastifyInstance): Promise<void> {
       } catch (err) {
         request.log.error(err, "Failed to fetch campaign stats");
         return internalError(reply, "Failed to fetch campaign stats");
+      }
+    },
+  );
+
+  /* ------ POST /campaigns/wallet-connect/claim ------ */
+  /**
+   * Public (wallet-auth'd) claim route for the wallet-connect bonus
+   * campaign seeded by `scripts/seed-rewardz-protocol.sql`. Unlike the
+   * protocol-scoped CRUD above this lives at a flat path because the
+   * mini-app (mini-app-ux-spec.md §6) doesn't know — and shouldn't need
+   * to know — the protocol UUID that owns the campaign.
+   *
+   * Idempotency is delegated to `awardPoints` via a per-wallet
+   * reference key `wallet-connect:<wallet>`. A second claim for the
+   * same wallet returns `{ awarded: false, reason: "already_claimed" }`
+   * with no ledger mutation — the dup branch ROLLBACKs inside
+   * `awardPoints` before any write.
+   *
+   * `enforceCapacity: false` is deliberate: this is a platform bonus,
+   * not a league-gated award. Passing `true` here would make the claim
+   * fail if the Rewardz protocol happened to be over its league cap,
+   * which would be the wrong UX for an onboarding incentive.
+   */
+  app.post<{ Body: WalletConnectClaimBody }>(
+    "/campaigns/wallet-connect/claim",
+    { preHandler: [requireWalletAuth] },
+    async (request, reply) => {
+      const parse = walletConnectClaimBodySchema.safeParse(request.body);
+      if (!parse.success) {
+        return badRequest(
+          reply,
+          `Invalid body: ${parse.error.issues.map((i) => i.message).join(", ")}`,
+        );
+      }
+      const body = parse.data;
+
+      // Wallet-match guard: the authenticated wallet (set by
+      // requireWalletAuth) MUST equal the wallet in the body. Without
+      // this a caller could sign in as wallet A and award points to
+      // wallet B by changing the body — the reference idempotency key
+      // uses body.wallet, so a mismatch would also quietly bypass the
+      // "already_claimed" check for the real owner of that wallet.
+      if (request.walletAddress !== body.wallet) {
+        return reply.status(403).send({ error: "wallet_mismatch" });
+      }
+
+      try {
+        const campaignRes = await query<{
+          campaign_id: string;
+          protocol_id: string;
+          points_per_completion: number;
+          status: string;
+          start_at: Date | null;
+          end_at: Date | null;
+        }>(
+          `SELECT campaign_id, protocol_id, points_per_completion, status,
+                  start_at, end_at
+             FROM campaigns
+            WHERE campaign_id = $1
+            LIMIT 1`,
+          [WALLET_CONNECT_CAMPAIGN_ID],
+        );
+
+        if (campaignRes.rowCount === 0) {
+          return reply.status(503).send({
+            awarded: false,
+            reason: "campaign_not_seeded",
+          });
+        }
+
+        const row = campaignRes.rows[0];
+        const now = new Date();
+        const startOk = row.start_at === null || row.start_at <= now;
+        const endOk = row.end_at === null || row.end_at >= now;
+        if (row.status !== "active" || !startOk || !endOk) {
+          return reply.status(200).send({
+            awarded: false,
+            reason: "campaign_inactive",
+          });
+        }
+
+        const result = await awardPoints(
+          body.wallet,
+          BigInt(row.points_per_completion),
+          row.protocol_id,
+          { type: "reference", key: `wallet-connect:${body.wallet}` },
+          "wallet_connect_bonus",
+          "api",
+          { enforceCapacity: false },
+        );
+
+        if (result.duplicate === true) {
+          return reply.status(200).send({
+            awarded: false,
+            reason: "already_claimed",
+            newBalance: result.new_balance?.toString() ?? null,
+          });
+        }
+
+        // Best-effort referral attribution. We intentionally do NOT
+        // make an internal HTTP call to /v1/referrals/attribute here —
+        // coupling a success-path claim to an in-process HTTP hop is
+        // fragile (it would need an internal API key, a fresh wallet
+        // signature, or a new unauthenticated path) and the referrals
+        // flow has its own dedicated endpoint the mini-app can call in
+        // parallel. Log the ref so it's visible in server logs while
+        // the service-layer extraction lands in a follow-up.
+        if (body.ref) {
+          request.log.info(
+            { wallet: body.wallet, ref: body.ref },
+            "wallet-connect claim with referral code (attribution log-only)",
+          );
+        }
+
+        return reply.status(200).send({
+          awarded: true,
+          points: row.points_per_completion,
+          newBalance: result.new_balance?.toString() ?? null,
+          eventId: result.event_id ?? null,
+        });
+      } catch (err) {
+        request.log.error(err, "Failed to process wallet-connect claim");
+        return internalError(reply, "Failed to process wallet-connect claim");
       }
     },
   );
