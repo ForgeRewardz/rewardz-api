@@ -29,6 +29,9 @@ const envSchema = z.object({
   TWITTER_BEARER_TOKEN: z.string().optional(), // Optional: tweet verification is stubbed
   ZEALY_DEFAULT_SECRET: z.string().optional(),
   POINTS_AWARD_RATE_LIMIT: z.coerce.number().default(100),
+  // Per-wallet, per-UTC-day free discovery-search quota before the composer
+  // prompts the user to schedule for tomorrow. See mini-app-ux-spec.md §7.2.
+  DISCOVERY_FREE_QUOTA_PER_DAY: z.coerce.number().int().positive().default(3),
   JWT_SECRET: z.string().min(1, "JWT_SECRET is required"),
   INTERNAL_API_KEY: z.string().min(1, "INTERNAL_API_KEY is required"),
   ALLOWED_ORIGINS: z.string().optional(), // Comma-separated allowed CORS origins
