@@ -29,8 +29,54 @@ interface RuleMatch {
   params: Record<string, unknown>;
 }
 
-function matchRules(queryStr: string): RuleMatch | null {
+export function matchRules(queryStr: string): RuleMatch | null {
   const q = queryStr.trim().toLowerCase();
+
+  // Protocol-specific rules (marinade / jupiter / kamino) — matched first so
+  // a query like "stake 1 SOL on marinade" picks the correct protocol without
+  // going through the generic "stake X" rule.
+  const marinadeStake = q.match(
+    /^stake\s+(\d+(?:\.\d+)?)\s+sol\s+(?:on|with)\s+marinade/i,
+  );
+  if (marinadeStake) {
+    return {
+      action_type: "stake",
+      params: {
+        asset: "SOL",
+        amount: parseFloat(marinadeStake[1]),
+        protocol_hint: "marinade",
+      },
+    };
+  }
+
+  const jupiterSwap = q.match(
+    /^swap\s+(\d+(?:\.\d+)?)\s+(\S+)\s+(?:to|for)\s+(\S+)\s+(?:on|via|through)\s+jupiter/i,
+  );
+  if (jupiterSwap) {
+    return {
+      action_type: "swap",
+      params: {
+        asset_in: jupiterSwap[2].toUpperCase(),
+        asset_out: jupiterSwap[3].toUpperCase(),
+        amount_in: parseFloat(jupiterSwap[1]),
+        protocol_hint: "jupiter",
+      },
+    };
+  }
+
+  const kaminoLendBorrow = q.match(
+    /^(lend|borrow)\s+(\d+(?:\.\d+)?)\s+(\S+)\s+(?:on|with)\s+kamino/i,
+  );
+  if (kaminoLendBorrow) {
+    return {
+      action_type: kaminoLendBorrow[1].toLowerCase() as "lend" | "borrow",
+      params: {
+        asset: kaminoLendBorrow[3].toUpperCase(),
+        amount: parseFloat(kaminoLendBorrow[2]),
+        protocol_hint: "kamino",
+      },
+    };
+  }
 
   // "swap X to Y" or "swap X for Y"
   const swapMatch = q.match(/^swap\s+(\S+)\s+(?:to|for)\s+(\S+)/i);
@@ -142,6 +188,34 @@ async function resolveWithAI(
 }
 
 /* -------------------------------------------------------------------------- */
+/*  Rate-limit                                                                */
+/* -------------------------------------------------------------------------- */
+
+// Token-bucket for Gemini throughput. When the bucket is empty, resolveIntent
+// short-circuits to the rules path without attempting the AI call. Bucket
+// refills at DISCOVERY_LLM_MAX_RPS tokens/sec, capped at the same value so
+// short bursts get a boost without runaway. Module-scope state is fine — a
+// single Fastify process is the granularity we rate-limit at.
+const aiBucket = (() => {
+  const max = config.DISCOVERY_LLM_MAX_RPS;
+  let tokens = max;
+  let lastRefill = Date.now();
+  return {
+    tryConsume(): boolean {
+      const now = Date.now();
+      const elapsedSec = (now - lastRefill) / 1000;
+      tokens = Math.min(max, tokens + elapsedSec * max);
+      lastRefill = now;
+      if (tokens >= 1) {
+        tokens -= 1;
+        return true;
+      }
+      return false;
+    },
+  };
+})();
+
+/* -------------------------------------------------------------------------- */
 /*  Public API                                                                */
 /* -------------------------------------------------------------------------- */
 
@@ -150,12 +224,20 @@ export async function resolveIntent(
   userWallet: string,
   protocolRegistry: Protocol[],
 ): Promise<IntentResult> {
-  // Prefer AI path when configured
-  if (config.GEMINI_API_KEY) {
-    return resolveWithAI(queryStr, userWallet, protocolRegistry);
+  // Prefer AI path when configured AND rate-limit has capacity. On AI failure
+  // (thrown error, timeout, etc.) we fall through to rules rather than
+  // surfacing the error — the resolver must remain functional even if Gemini
+  // is down. Callers see `resolver_type: "rules"` to observe the fallback.
+  if (config.GEMINI_API_KEY && aiBucket.tryConsume()) {
+    try {
+      return await resolveWithAI(queryStr, userWallet, protocolRegistry);
+    } catch {
+      // Intentional suppression — fall through to rules.
+    }
   }
 
-  // Rules-based fallback
+  // Rules-based fallback — also taken when: no Gemini key, rate-limited, or
+  // AI path threw above.
   const match = matchRules(queryStr);
 
   if (!match) {

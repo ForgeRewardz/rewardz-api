@@ -26,6 +26,11 @@ const envSchema = z.object({
     .default("devnet")
     .transform((v): Network => (v === "localnet" ? "devnet" : v)),
   GEMINI_API_KEY: z.string().optional(), // Optional: rules-based fallback when unavailable
+  DISCOVERY_LLM_MAX_RPS: z.coerce.number().int().positive().default(5),
+  // Internal token-bucket rate-limit for the Gemini classifier used by
+  // resolveIntent. When exceeded the resolver short-circuits to the
+  // rules-based matcher rather than returning an error. See
+  // mini-app-ux-spec.md §7.5.
   TWITTER_BEARER_TOKEN: z.string().optional(), // Optional: tweet verification is stubbed
   ZEALY_DEFAULT_SECRET: z.string().optional(),
   POINTS_AWARD_RATE_LIMIT: z.coerce.number().default(100),
