@@ -12,12 +12,12 @@ describe("Migration files", () => {
     .filter((f) => f.endsWith(".sql"))
     .sort();
 
-  it("should have exactly 46 migration files", () => {
-    expect(files.length).toBe(46);
+  it("should have exactly 47 migration files", () => {
+    expect(files.length).toBe(47);
   });
 
-  it("should have filenames in correct order (001-046)", () => {
-    for (let i = 0; i < 46; i++) {
+  it("should have filenames in correct order (001-047)", () => {
+    for (let i = 0; i < 47; i++) {
       const expected = String(i + 1).padStart(3, "0");
       expect(files[i]).toMatch(new RegExp(`^${expected}_`));
     }
@@ -101,6 +101,13 @@ describe("Migration files", () => {
         /CREATE UNIQUE INDEX[\s\S]*rewardz_earnings_protocol_reason_unique_idx[\s\S]*WHERE\s+milestone_id IS NULL/i,
       "046_protocols_active_stake.sql":
         /ALTER TABLE\s+protocols[\s\S]*ADD COLUMN\s+IF NOT EXISTS\s+active_stake/i,
+      // 047 creates three discovery tables in one migration (quota ledger,
+      // scheduled runs, and completed results). The existing `expectedTables`
+      // map assumes one CREATE TABLE per migration plus a bare `CREATE TABLE
+      // <name>`; 047 uses `CREATE TABLE IF NOT EXISTS` and ships three tables,
+      // so we assert the shape via a single regex covering all three.
+      "047_discovery.sql":
+        /CREATE TABLE IF NOT EXISTS\s+discovery_usage[\s\S]*CREATE TABLE IF NOT EXISTS\s+discovery_schedules[\s\S]*CREATE TABLE IF NOT EXISTS\s+discovery_results/i,
     };
 
     for (const file of files) {
