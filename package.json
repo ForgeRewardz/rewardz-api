@@ -10,7 +10,7 @@
     "test": "vitest run",
     "migrate": "tsx src/db/migrate.ts",
     "seed": "tsx src/db/seed.ts",
-    "seed:rewardz": "psql \"$DATABASE_URL\" -v ON_ERROR_STOP=1 -f scripts/seed-rewardz-protocol.sql"
+    "seed:rewardz": "tsx src/db/seed-rewardz.ts"
   },
   "dependencies": {
     "@fastify/cors": "^11.0.1",
