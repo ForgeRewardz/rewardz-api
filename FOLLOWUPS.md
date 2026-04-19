@@ -42,3 +42,13 @@ Moving 14 test files from the legacy `process.env.X ??= ...` pattern at the top 
 ### Pre-existing regression
 
 - `tests/league-config-parity.test.ts` was initially reported as timing out (the rust dump-config binary). Passed during verify (5486ms) — monitor in CI.
+
+## Session 3 follow-ups (2026-04-19)
+
+### awardPoints race on concurrent claims (pre-existing)
+
+`services/points-service.ts` checks duplicates via `SELECT FROM point_events WHERE source_reference = $1` before `INSERT`. Two concurrent requests against the same reference key both see no prior row, enter the INSERT, and one loses to the `source_reference` UNIQUE constraint (23505). The loser currently throws and surfaces as a 500 rather than `{duplicate: true}`. The wallet-connect claim route's strengthened check makes this window narrower (we SELECT first in the route too), but it's still reachable under simultaneous clicks on identical wallets. Fix: catch `UniqueViolation` inside `awardPoints` and re-query to return `{duplicate: true}` instead of crashing.
+
+### telemetry_events retention
+
+Migration 048 adds the table without a retention policy. Add a cron or pg_cron job to `DELETE FROM telemetry_events WHERE created_at < NOW() - INTERVAL '90 days'` once the volume becomes visible.

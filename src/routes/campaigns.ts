@@ -659,22 +659,109 @@ export async function campaignRoutes(app: FastifyInstance): Promise<void> {
           });
         }
 
+        // Explicit "already claimed" check: require an actual `point_events`
+        // row that (a) targets this wallet, (b) uses the wallet-connect
+        // reference key, (c) is of type 'awarded', and (d) has amount > 0.
+        // This is intentionally stronger than relying on awardPoints' own
+        // `source_reference`-unique guard — `already_claimed` is a
+        // user-facing signal and we want it backed by a concrete "received
+        // N points on T" record, not the absence-of-INSERT side-effect.
+        //
+        // `source_reference` is UNIQUE (migration 018_point_events.sql); at
+        // most one row can match. `ORDER BY created_at ASC LIMIT 1` is
+        // defensive — explicit and cheap — so a future relaxation of that
+        // constraint doesn't silently change behaviour here.
+        const referenceKey = `wallet-connect:${body.wallet}`;
+        const priorAward = await query<{
+          id: string;
+          amount: string;
+          created_at: Date;
+          reason: string | null;
+        }>(
+          `SELECT id, amount::text AS amount, created_at, reason
+             FROM point_events
+            WHERE user_wallet       = $1
+              AND source_reference  = $2
+              AND type              = 'awarded'
+              AND amount            > 0
+            ORDER BY created_at ASC
+            LIMIT 1`,
+          [body.wallet, referenceKey],
+        );
+
+        if (priorAward.rowCount && priorAward.rowCount > 0) {
+          const award = priorAward.rows[0];
+          // Number() is safe for `points_per_completion` up to 2^53 - 1
+          // (~9.007e15). The schema stores `amount` as BIGINT; pg returns
+          // it as string to preserve precision. If a future campaign ever
+          // needs a point amount beyond 2^53 this must move to a string
+          // (BigInt) on the wire.
+          return reply.status(200).send({
+            awarded: false,
+            reason: "already_claimed",
+            points: Number(award.amount),
+            eventId: award.id,
+            awardedAt: award.created_at.toISOString(),
+          });
+        }
+
         const result = await awardPoints(
           body.wallet,
           BigInt(row.points_per_completion),
           row.protocol_id,
-          { type: "reference", key: `wallet-connect:${body.wallet}` },
+          { type: "reference", key: referenceKey },
           "wallet_connect_bonus",
           "api",
           { enforceCapacity: false },
         );
 
         if (result.duplicate === true) {
-          return reply.status(200).send({
-            awarded: false,
-            reason: "already_claimed",
-            newBalance: result.new_balance?.toString() ?? null,
-          });
+          // Narrow race window: another request awarded this wallet between
+          // our priorAward read and the awardPoints call. Re-query so the
+          // response carries the real amount + timestamp instead of the
+          // campaign default.
+          const raceAward = await query<{
+            id: string;
+            amount: string;
+            created_at: Date;
+          }>(
+            `SELECT id, amount::text AS amount, created_at
+               FROM point_events
+              WHERE user_wallet      = $1
+                AND source_reference = $2
+                AND type             = 'awarded'
+                AND amount           > 0
+              ORDER BY created_at ASC
+              LIMIT 1`,
+            [body.wallet, referenceKey],
+          );
+          if (raceAward.rowCount && raceAward.rowCount > 0) {
+            const award = raceAward.rows[0];
+            return reply.status(200).send({
+              awarded: false,
+              reason: "already_claimed",
+              points: Number(award.amount),
+              eventId: award.id,
+              awardedAt: award.created_at.toISOString(),
+            });
+          }
+          // awardPoints reported duplicate but we can't find a matching
+          // awarded row — log loudly, this indicates data corruption (e.g.
+          // a spent/refunded row with the same reference). Surface an
+          // error instead of quietly returning already_claimed with no
+          // backing record.
+          request.log.error(
+            {
+              wallet: body.wallet,
+              reference: referenceKey,
+              eventId: result.event_id,
+            },
+            "wallet-connect duplicate guard tripped without a matching awarded row",
+          );
+          return internalError(
+            reply,
+            "Claim state inconsistent; contact support",
+          );
         }
 
         // Best-effort referral attribution. We intentionally do NOT
