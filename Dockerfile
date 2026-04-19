@@ -59,6 +59,12 @@ WORKDIR /app
 COPY --from=deps /app/node_modules ./node_modules
 COPY --from=build /app/dist ./dist
 COPY --from=build /app/src/db/migrations ./dist/db/migrations
+# Seed SQL ships alongside the compiled app so an operator can apply it
+# with `docker exec -i <pg> psql … < /app/scripts/<seed>.sql`. The
+# wallet-connect bonus campaign lives in scripts/seed-rewardz-protocol.sql;
+# without this the `/v1/campaigns/wallet-connect/claim` endpoint returns
+# `{awarded: false, reason: "campaign_not_seeded"}` on a fresh database.
+COPY api/scripts ./scripts
 COPY api/package.json ./
 
 EXPOSE 3001
