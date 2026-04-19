@@ -155,12 +155,25 @@ export async function gameRoutes(app: FastifyInstance): Promise<void> {
         roundId?: string;
       };
 
-      reply.raw.writeHead(200, {
+      // Carry the CORS headers set by @fastify/cors into the raw response.
+      // Fastify's cors plugin attaches headers via `reply.header(...)` on the
+      // onRequest hook; `reply.raw.writeHead(...)` bypasses the
+      // reply.headers object, so without this merge the browser sees a
+      // 200 response with no Access-Control-Allow-Origin and blocks it.
+      const sseHeaders: Record<string, string | number | string[]> = {
         "Content-Type": "text/event-stream",
         "Cache-Control": "no-cache, no-transform",
         Connection: "keep-alive",
         "X-Accel-Buffering": "no",
-      });
+      };
+      for (const [name, value] of Object.entries(reply.getHeaders())) {
+        if (value === undefined) continue;
+        const lower = name.toLowerCase();
+        if (lower.startsWith("access-control-") || lower === "vary") {
+          sseHeaders[name] = value as string | number | string[];
+        }
+      }
+      reply.raw.writeHead(200, sseHeaders);
       // Flush buffers with an immediate comment frame so clients know the
       // handshake is open (important on CDNs that buffer until first byte).
       reply.raw.write(":ready\n\n");
