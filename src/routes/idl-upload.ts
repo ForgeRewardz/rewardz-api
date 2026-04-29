@@ -26,6 +26,7 @@ import { z } from "zod";
 import { requireBearerAuth, requireProtocolOwner } from "../middleware/auth.js";
 import {
   getIdl,
+  getInstructionPreview,
   listInstructions,
   uploadIdl,
 } from "../services/idl-service.js";
@@ -134,8 +135,23 @@ export async function idlUploadRoutes(app: FastifyInstance): Promise<void> {
     },
   );
 
-  /* ------ GET /protocols/:id/idls/:idlId/instructions ------ */
-  app.get<{ Params: IdlParams }>(
+  /* ------ GET /protocols/:id/idls/:idlId/instructions ------
+   *
+   * Two response shapes on the same path, chosen by the presence of
+   * the `instructionName` query param:
+   *
+   *   - No query param → bulk list for the wizard overview (every
+   *     instruction with a best-effort classification or per-row error).
+   *   - `?instructionName=foo` → rich single-instruction preview for
+   *     the console's picker step: programId, account order, arg order,
+   *     classification, account flags, arg type hints.
+   *
+   * Both are 200 on success. A missing instruction on the single-preview
+   * branch surfaces as 404 — the list-endpoint does NOT emit 404 for an
+   * instruction that classifies with errors; the error is part of the
+   * per-row payload so the grid can still render the rest of the IDL.
+   */
+  app.get<{ Params: IdlParams; Querystring: { instructionName?: string } }>(
     "/protocols/:id/idls/:idlId/instructions",
     {
       preHandler: [requireBearerAuth, requireProtocolOwner],
@@ -146,7 +162,17 @@ export async function idlUploadRoutes(app: FastifyInstance): Promise<void> {
         return badRequest(reply, "Invalid path parameters");
       }
 
+      const { instructionName } = request.query;
+
       try {
+        if (instructionName && instructionName.length > 0) {
+          const preview = await getInstructionPreview(
+            paramsParsed.data.id,
+            paramsParsed.data.idlId,
+            instructionName,
+          );
+          return reply.status(200).send(preview);
+        }
         const result = await listInstructions(
           paramsParsed.data.id,
           paramsParsed.data.idlId,
@@ -156,7 +182,7 @@ export async function idlUploadRoutes(app: FastifyInstance): Promise<void> {
         request.log.error(err, "Failed to list instructions");
         const message = err instanceof Error ? err.message : String(err);
         if (/not found/i.test(message)) {
-          return notFound(reply, "IDL not found for protocol");
+          return notFound(reply, message);
         }
         return internalError(reply, "Failed to list instructions");
       }

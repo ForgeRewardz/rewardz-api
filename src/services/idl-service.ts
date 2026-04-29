@@ -55,6 +55,24 @@ export interface GetIdlResult {
   hash: string;
 }
 
+/**
+ * Rich single-instruction preview returned when the list endpoint is
+ * called with a specific `instructionName` query param. The console's
+ * picker step consumes this directly — it carries the IDL-declared
+ * account and argument ordering (which the bucket grid renders
+ * row-by-row) plus the program id so the downstream program-profile
+ * editor knows which `(protocol, program)` tuple to key off.
+ */
+export interface InstructionPreviewRich {
+  instructionName: string;
+  programId: string;
+  accountOrder: string[];
+  argOrder: string[];
+  classification: InstructionClassification;
+  accountFlags: Record<string, { isSigner: boolean; isWritable: boolean }>;
+  argTypes: Record<string, string>;
+}
+
 /* -------------------------------------------------------------------------- */
 /*  Internal helpers                                                          */
 /* -------------------------------------------------------------------------- */
@@ -173,6 +191,131 @@ export async function listInstructions(
   }
 
   return { instructions };
+}
+
+/**
+ * Return the rich single-instruction preview the console picker step
+ * needs. This is the `instructionName=...` branch of the list endpoint
+ * — `listInstructions` keeps the bulk shape for callers that want
+ * every instruction at once.
+ *
+ * Looks up the stored IDL row, finds the named instruction in either
+ * `program.instructions` or any `additionalPrograms[*].instructions`,
+ * and pulls:
+ *
+ *   - programId from the owning program node (`publicKey`)
+ *   - accountOrder from the instruction's account list (IDL order, so
+ *     the bucket grid rows line up with the on-chain account meta
+ *     order consumed by buildInstruction)
+ *   - argOrder from the instruction's argument list
+ *   - classification via the SDK's classifyInstruction
+ *   - accountFlags (isSigner / isWritable) for the bucket grid tooltip
+ *   - argTypes (scalar name) for the publish-step input form
+ */
+export async function getInstructionPreview(
+  protocolId: string,
+  idlId: string,
+  instructionName: string,
+): Promise<InstructionPreviewRich> {
+  const result = await query<{ normalised_json: CodamaRootNode }>(
+    `SELECT normalised_json
+       FROM protocol_idls
+      WHERE id = $1 AND protocol_id = $2
+      LIMIT 1`,
+    [idlId, protocolId],
+  );
+
+  if (result.rowCount === 0) {
+    throw new Error("IDL not found for protocol");
+  }
+
+  const root = result.rows[0].normalised_json as unknown as Record<
+    string,
+    unknown
+  >;
+
+  interface IxAccount {
+    name: string;
+    isSigner?: boolean | "either";
+    isWritable?: boolean;
+  }
+  interface IxArg {
+    name: string;
+    type?: { kind?: string; format?: string };
+  }
+  interface IxNode {
+    name: string;
+    accounts: IxAccount[];
+    arguments: IxArg[];
+  }
+  interface ProgNode {
+    publicKey?: string;
+    instructions: IxNode[];
+  }
+
+  // Probe v1 (`program`) and v2 (`programs[0]`) Codama shapes — mirrors
+  // the defensive `extractInstructionNames` helper above.
+  const candidates: ProgNode[] = [];
+  const v2Programs = root.programs as ProgNode[] | undefined;
+  if (Array.isArray(v2Programs)) candidates.push(...v2Programs);
+  const v1Program = root.program as ProgNode | undefined;
+  if (v1Program && !Array.isArray(v2Programs)) candidates.push(v1Program);
+  const extras = root.additionalPrograms as ProgNode[] | undefined;
+  if (Array.isArray(extras)) candidates.push(...extras);
+
+  let matchedProgram: ProgNode | null = null;
+  let matchedIx: IxNode | null = null;
+  for (const prog of candidates) {
+    const ix = prog.instructions?.find((i) => i.name === instructionName);
+    if (ix) {
+      matchedProgram = prog;
+      matchedIx = ix;
+      break;
+    }
+  }
+
+  if (!matchedProgram || !matchedIx) {
+    throw new Error(`Instruction '${instructionName}' not found in IDL`);
+  }
+
+  const accountOrder = matchedIx.accounts.map((a) => a.name);
+  const argOrder = matchedIx.arguments.map((a) => a.name);
+
+  const accountFlags: Record<
+    string,
+    { isSigner: boolean; isWritable: boolean }
+  > = {};
+  for (const account of matchedIx.accounts) {
+    accountFlags[account.name] = {
+      isSigner: account.isSigner === true || account.isSigner === "either",
+      isWritable: account.isWritable === true,
+    };
+  }
+
+  const argTypes: Record<string, string> = {};
+  for (const arg of matchedIx.arguments) {
+    const t = arg.type;
+    if (t && typeof t === "object") {
+      if (t.format) argTypes[arg.name] = t.format;
+      else if (t.kind) argTypes[arg.name] = t.kind;
+    }
+  }
+
+  // classifyInstruction expects the full CodamaRootNode, so cast back.
+  const classification = classifyInstruction(
+    root as unknown as CodamaRootNode,
+    instructionName,
+  );
+
+  return {
+    instructionName,
+    programId: matchedProgram.publicKey ?? "",
+    accountOrder,
+    argOrder,
+    classification,
+    accountFlags,
+    argTypes,
+  };
 }
 
 /**

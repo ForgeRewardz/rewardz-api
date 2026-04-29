@@ -1,10 +1,8 @@
 import crypto from "node:crypto";
 import type { FastifyInstance, FastifyRequest, FastifyReply } from "fastify";
-import {
-  requireWalletAuth,
-  requireBearerAuth,
-  requireProtocolOwner,
-} from "../middleware/auth.js";
+import { z } from "zod";
+import { requireBearerAuth, requireProtocolOwner } from "../middleware/auth.js";
+import { rateLimit } from "../middleware/rate-limit.js";
 import { query, pool } from "../db/client.js";
 import { league } from "../config.js";
 import { BASE58_PUBKEY } from "../types/solana.js";
@@ -14,11 +12,82 @@ import { capacityBaseline as capacityBaselineOf } from "../services/capacity.js"
 /*  Request types                                                             */
 /* -------------------------------------------------------------------------- */
 
-interface RegisterBody {
-  name: string;
-  description?: string;
-  blink_base_url?: string;
-  supported_actions?: string[];
+/**
+ * Register-protocol body schema.
+ *
+ *   - `name`: trimmed, 3..80 chars.
+ *   - `description`: empty string coerced to null so we don't persist
+ *     whitespace the UI submits by accident.
+ *   - `blink_base_url`: empty string coerced to null; otherwise must
+ *     parse as an http(s) URL.
+ *   - `supported_actions`: array of trimmed, deduplicated non-empty
+ *     strings ≤48 chars. Duplicates are collapsed server-side so the
+ *     DB doesn't grow bigger than the UI implied.
+ */
+const REGISTER_BODY_SCHEMA = z
+  .object({
+    name: z
+      .string()
+      .transform((s) => s.trim())
+      .pipe(
+        z
+          .string()
+          .min(3, "name must be at least 3 characters")
+          .max(80, "name must be 80 characters or fewer"),
+      ),
+    description: z
+      .string()
+      .transform((s) => s.trim())
+      .pipe(z.string().max(500, "description must be 500 characters or fewer"))
+      .transform((s) => (s.length === 0 ? null : s))
+      .nullable()
+      .optional(),
+    blink_base_url: z
+      .string()
+      .transform((s) => s.trim())
+      .pipe(
+        z.string().max(500, "blink_base_url must be 500 characters or fewer"),
+      )
+      .transform((s) => (s.length === 0 ? null : s))
+      .nullable()
+      .optional()
+      .refine(
+        (v) => v == null || /^https?:\/\/[^\s]+$/i.test(v),
+        "blink_base_url must start with http:// or https://",
+      ),
+    supported_actions: z
+      .array(
+        z
+          .string()
+          .transform((s) => s.trim())
+          .pipe(
+            z
+              .string()
+              .min(1, "supported_actions entries must not be empty")
+              .max(48, "supported_actions entries must be ≤48 chars"),
+          ),
+      )
+      .optional()
+      .transform((arr) => (arr ? Array.from(new Set(arr)) : arr)),
+  })
+  .strict();
+
+type RegisterBody = z.infer<typeof REGISTER_BODY_SCHEMA>;
+
+/**
+ * Narrow a caught error to Postgres's unique-violation code (`23505`).
+ * `pg` surfaces this as a string `.code` on the error object. We lean
+ * on duck-typing rather than importing `pg` types here because the
+ * rest of this file uses the string-based codes consistently and
+ * adding a type import for one branch isn't worth the churn.
+ */
+function isPgUniqueViolation(err: unknown): boolean {
+  return (
+    typeof err === "object" &&
+    err !== null &&
+    "code" in err &&
+    (err as { code?: unknown }).code === "23505"
+  );
 }
 
 interface ProtocolParams {
@@ -57,22 +126,78 @@ interface CreateQuestBody {
 /* -------------------------------------------------------------------------- */
 
 export async function protocolRoutes(app: FastifyInstance): Promise<void> {
-  /* ------ POST /protocols/register ------ */
+  /* ------ POST /protocols/register ------
+   *
+   * Auth: `requireBearerAuth`. The original gate was `requireWalletAuth`
+   * (static-message ed25519 signature in the `x-wallet-*` headers), but
+   * the console already signs in via `/v1/auth/challenge` + `/v1/auth/verify`
+   * and holds a bearer JWT — asking the admin to re-sign a second message
+   * to register is friction with no security win (the JWT is itself
+   * rooted in a fresh wallet signature). No external client called this
+   * route with wallet headers, so the switch is non-breaking.
+   *
+   * The authenticated wallet becomes the `admin_wallet` on the new row,
+   * so protocol ownership is attributed purely to the signed-in identity
+   * — the body never gets to name a different wallet.
+   *
+   * Schema invariant: `protocols.admin_wallet` is UNIQUE (migration 003).
+   * MVP policy is **one protocol per wallet**. We pre-check to return a
+   * friendly 409 rather than a 500 from the generic catch; the catch
+   * still traps the `23505` unique-violation for the TOCTOU race between
+   * two concurrent register requests from the same wallet (e.g. double-
+   * clicked submit). Admins with an existing protocol use PATCH to
+   * update metadata; key loss is recoverable via the rotate endpoint.
+   *
+   * Rate limit: 5 requests / 60s per wallet-bound rate-limit key. Sized
+   * so a human can retry after a validation failure but a bot can't
+   * farm inserts. See `middleware/rate-limit.ts` for the key derivation.
+   *
+   * Status: hard-written as `'active'` even though the schema default is
+   * `'pending'`. MVP policy is self-serve activation — there's no
+   * moderation queue. If that changes, move registration to 'pending'
+   * and gate activation on a separate approval flow.
+   *
+   * Response includes the raw `api_key` exactly once. The admin must
+   * persist it client-side; only the sha-256 hash is stored server-side.
+   */
   app.post(
     "/protocols/register",
-    { preHandler: [requireWalletAuth] },
+    { preHandler: [requireBearerAuth, rateLimit(60_000, 5)] },
     async (request: FastifyRequest, reply: FastifyReply) => {
-      const body = request.body as RegisterBody | undefined;
       const walletAddress = request.walletAddress!;
 
-      if (!body?.name) {
-        return reply
-          .status(400)
-          .send({ error: "Bad Request", message: "name is required" });
+      const parsed = REGISTER_BODY_SCHEMA.safeParse(request.body);
+      if (!parsed.success) {
+        return reply.status(400).send({
+          error: "Bad Request",
+          message: parsed.error.issues
+            .map((i) => `${i.path.join(".") || "body"}: ${i.message}`)
+            .join("; "),
+        });
+      }
+      const body: RegisterBody = parsed.data;
+
+      // Pre-check: does this wallet already own a protocol? Returns a
+      // structured 409 with the existing protocol_id so the console can
+      // route the admin to the dashboard instead of rendering the form
+      // a second time. This is the humane path; the catch below handles
+      // the race where two requests land between this SELECT and the
+      // INSERT.
+      const existing = await query<{ id: string }>(
+        `SELECT id FROM protocols WHERE admin_wallet = $1 LIMIT 1`,
+        [walletAddress],
+      );
+      if ((existing.rowCount ?? 0) > 0) {
+        return reply.status(409).send({
+          error: "Conflict",
+          message:
+            "Wallet already owns a protocol. One protocol per wallet is the current policy — use PATCH /v1/protocols/:id to update or POST /v1/protocols/:id/rotate-api-key to reset the api key.",
+          protocol_id: existing.rows[0].id,
+        });
       }
 
       try {
-        // Generate a raw API key and store its hash
+        // Generate a raw API key and store its hash.
         const rawApiKey = `rwz_${crypto.randomUUID().replace(/-/g, "")}`;
         const apiKeyHash = crypto
           .createHash("sha256")
@@ -95,16 +220,104 @@ export async function protocolRoutes(app: FastifyInstance): Promise<void> {
 
         return reply.status(201).send({
           protocol_id: result.rows[0].id,
+          admin_wallet: walletAddress,
           api_key: rawApiKey,
           name: body.name,
           status: "active",
           created_at: result.rows[0].created_at,
         });
       } catch (err) {
+        // Catch the unique-violation that slipped past the pre-check via
+        // a TOCTOU race. Pull the actual id so the client still gets a
+        // usable handle — the race resolves to "pick one winner".
+        if (isPgUniqueViolation(err)) {
+          const race = await query<{ id: string }>(
+            `SELECT id FROM protocols WHERE admin_wallet = $1 LIMIT 1`,
+            [walletAddress],
+          );
+          return reply.status(409).send({
+            error: "Conflict",
+            message:
+              "Wallet already owns a protocol (race detected). Retry against the existing id.",
+            protocol_id: race.rows[0]?.id ?? null,
+          });
+        }
         request.log.error(err, "Failed to register protocol");
         return reply.status(500).send({
           error: "Internal Server Error",
           message: "Failed to register protocol",
+        });
+      }
+    },
+  );
+
+  /* ------ POST /protocols/:id/rotate-api-key ------
+   *
+   * Mint a fresh api key for a protocol the signed-in wallet owns.
+   * Covers two cases:
+   *   1. Admin registered but didn't copy the key off the success screen
+   *      and refreshed the page — the key is lost to them (we only
+   *      persist the hash).
+   *   2. Admin believes the key has leaked and needs to invalidate any
+   *      in-flight external clients immediately.
+   * Response shape matches the relevant subset of /register so the
+   * console can reuse its "save this now" surface verbatim.
+   */
+  app.post<{ Params: ProtocolParams }>(
+    "/protocols/:id/rotate-api-key",
+    {
+      preHandler: [
+        requireBearerAuth,
+        requireProtocolOwner,
+        rateLimit(60_000, 5),
+      ],
+    },
+    async (request, reply) => {
+      const { id } = request.params;
+      try {
+        const rawApiKey = `rwz_${crypto.randomUUID().replace(/-/g, "")}`;
+        const apiKeyHash = crypto
+          .createHash("sha256")
+          .update(rawApiKey)
+          .digest("hex");
+
+        const result = await query<{
+          name: string;
+          admin_wallet: string;
+          status: string;
+          created_at: Date;
+          updated_at: Date;
+        }>(
+          `UPDATE protocols
+              SET api_key_hash = $1, updated_at = NOW()
+            WHERE id = $2
+            RETURNING name, admin_wallet, status, created_at, updated_at`,
+          [apiKeyHash, id],
+        );
+        if (result.rowCount === 0) {
+          // requireProtocolOwner already covers this case, but belt-and-
+          // braces — if the row was deleted between the preHandler and
+          // the UPDATE we still want to return a sensible status.
+          return reply
+            .status(404)
+            .send({ error: "Not Found", message: "Protocol not found" });
+        }
+
+        const row = result.rows[0];
+        return reply.status(200).send({
+          protocol_id: id,
+          admin_wallet: row.admin_wallet,
+          api_key: rawApiKey,
+          name: row.name,
+          status: row.status,
+          created_at: row.created_at.toISOString(),
+          rotated_at: row.updated_at.toISOString(),
+        });
+      } catch (err) {
+        request.log.error(err, "Failed to rotate api key");
+        return reply.status(500).send({
+          error: "Internal Server Error",
+          message: "Failed to rotate api key",
         });
       }
     },
@@ -126,6 +339,66 @@ export async function protocolRoutes(app: FastifyInstance): Promise<void> {
         return reply.status(200).send({ protocols: result.rows });
       } catch (err) {
         _request.log.error(err, "Failed to list protocols");
+        return reply.status(500).send({
+          error: "Internal Server Error",
+          message: "Failed to list protocols",
+        });
+      }
+    },
+  );
+
+  /* ------ GET /protocols/me ------
+   *
+   * Return every protocol owned by the bearer-authenticated wallet,
+   * most-recent first. The console uses this to resolve which protocol
+   * to show without needing a PROTOCOL_ID env var — the source of
+   * truth for "which protocol is this wallet's" is the DB, not a
+   * deploy-time constant.
+   *
+   * Note: we list every status, not just 'active'. The console can filter
+   * downstream; showing a disabled / suspended row with its status tag
+   * is better UX than pretending it doesn't exist when the admin tries
+   * to investigate why they can't issue points.
+   */
+  app.get(
+    "/protocols/me",
+    { preHandler: [requireBearerAuth] },
+    async (request, reply) => {
+      const walletAddress = request.walletAddress!;
+      try {
+        const result = await query<{
+          id: string;
+          name: string;
+          description: string | null;
+          blink_base_url: string | null;
+          supported_actions: string[];
+          trust_score: number;
+          status: string;
+          created_at: Date;
+        }>(
+          `SELECT id, name, description, blink_base_url, supported_actions,
+                  trust_score, status, created_at
+             FROM protocols
+            WHERE admin_wallet = $1
+            ORDER BY created_at DESC`,
+          [walletAddress],
+        );
+
+        return reply.status(200).send({
+          wallet: walletAddress,
+          protocols: result.rows.map((row) => ({
+            id: row.id,
+            name: row.name,
+            description: row.description,
+            blink_base_url: row.blink_base_url,
+            supported_actions: row.supported_actions,
+            trust_score: row.trust_score,
+            status: row.status,
+            created_at: row.created_at.toISOString(),
+          })),
+        });
+      } catch (err) {
+        request.log.error(err, "Failed to list protocols for wallet");
         return reply.status(500).send({
           error: "Internal Server Error",
           message: "Failed to list protocols",
