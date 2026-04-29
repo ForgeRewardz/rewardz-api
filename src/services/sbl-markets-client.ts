@@ -62,6 +62,18 @@ export interface SblFetchOptions {
   retries?: number;
 }
 
+// Marker error so the retry loop's catch block can distinguish HTTP-status
+// errors that should bail (4xx — auth, quota, malformed request) from
+// network/abort errors that should retry. Without this, the throw at the
+// non-retryable HTTP path would land in the generic catch and burn all
+// retries + backoff before surfacing — contradicting the documented intent.
+class SblNonRetryableError extends Error {
+  constructor(message: string) {
+    super(message);
+    this.name = "SblNonRetryableError";
+  }
+}
+
 // Internal: wrap fetch with timeout via AbortSignal + a basic retry loop.
 async function sblFetch(
   pathAndQuery: string,
@@ -94,10 +106,18 @@ async function sblFetch(
       clearTimeout(timer);
       if (!res.ok) {
         // Retry on 5xx; bail on 4xx so we surface auth / quota errors fast.
+        // 4xx throws a non-retryable marker so the catch below propagates
+        // it immediately instead of treating it as a network error.
         if (res.status >= 500 && attempt < totalRetries) {
           lastError = new Error(`SBL ${pathAndQuery} ${res.status}`);
-        } else {
+        } else if (res.status >= 500) {
+          // Final attempt on a 5xx — still surface as a regular Error so
+          // upstream telemetry can distinguish bail-outs from auth failures.
           throw new Error(
+            `SBL ${pathAndQuery} ${res.status} ${res.statusText}`,
+          );
+        } else {
+          throw new SblNonRetryableError(
             `SBL ${pathAndQuery} ${res.status} ${res.statusText}`,
           );
         }
@@ -106,6 +126,11 @@ async function sblFetch(
       }
     } catch (err) {
       clearTimeout(timer);
+      // 4xx (or any explicitly non-retryable) errors propagate immediately
+      // — never burn retries on auth/quota/malformed-request failures.
+      if (err instanceof SblNonRetryableError) {
+        throw err;
+      }
       // Abort errors and network errors are retryable up to the cap.
       if (attempt < totalRetries) {
         lastError = err;
