@@ -66,6 +66,13 @@ const envSchema = z.object({
   // the `/airdrop/signup` handler itself returns 503 if missing so a
   // misconfigured prod doesn't silently store plaintext.
   AIRDROP_EMAIL_KEY: z.string().optional(),
+  // Dialect Standard Blink Library (SBL) client key for markets.dial.to. The
+  // production prod-key is requested from hello@dialect.to (see Task 1 +
+  // docs/ops/dialect-key.md). Empty-string default mirrors the SOLANA_RPC_URL
+  // pattern: zod parses cleanly at boot so local dev / test envs without a
+  // key don't fail-fast, and the SBL client itself throws a helpful error at
+  // first request time if the key is still empty.
+  DIALECT_CLIENT_KEY: z.string().default(""),
   // Comma-separated base58 pubkeys allowed to hit admin-only endpoints.
   // Empty / unset env ⇒ empty array ⇒ all admin calls are rejected.
   // Invalid base58 entries ⇒ boot fails with a clear zod error (instead
